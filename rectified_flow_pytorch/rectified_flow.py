@@ -59,22 +59,28 @@ class RectifiedFlow(Module):
         data_shape = default(data_shape, self.data_shape)
         assert exists(data_shape), 'you need to either pass in a `data_shape` or have trained at least with one forward'
 
-        def fn(times, x):
+        def ode_fn(t, x):
             time_kwarg = self.time_cond_kwarg
 
             if exists(time_kwarg):
-                model_kwargs.update(**{time_kwarg: times})
+                model_kwargs.update(**{time_kwarg: t})
 
             return self.model(x, **model_kwargs)
 
-        y0 = torch.randn((batch_size, *data_shape))
+        # start with random gaussian noise - y0
 
-        t = torch.linspace(0., 1., steps, device = self.device)
+        noise = torch.randn((batch_size, *data_shape))
 
-        trajectory = odeint(fn, y0, t, **self.odeint_kwargs)
+        # time steps
 
-        sampled = trajectory[-1]
-        return sampled
+        times = torch.linspace(0., 1., steps, device = self.device)
+
+        # ode
+
+        trajectory = odeint(ode_fn, noise, times, **self.odeint_kwargs)
+
+        sampled_data = trajectory[-1]
+        return sampled_data
 
     def forward(
         self,
