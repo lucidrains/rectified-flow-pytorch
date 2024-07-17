@@ -37,7 +37,7 @@ class RectifiedFlow(Module):
     ):
         batch, device = data.shape[0], data.device
 
-        # x0 - gaussian noise
+        # x0 - gaussian noise, x1 - data
 
         noise = torch.randn_like(data)
 
@@ -48,8 +48,9 @@ class RectifiedFlow(Module):
 
         # Algorithm 2 in paper
         # linear interpolation of noise with data using random times
+        # x1 * t + x0 * (1 - t) - so from noise (time = 0) to data (time = 1.)
 
-        noised = padded_times * data + (1. - padded_times)
+        noised = padded_times * data + (1. - padded_times) * noise
 
         # prepare maybe time conditioning for model
 
