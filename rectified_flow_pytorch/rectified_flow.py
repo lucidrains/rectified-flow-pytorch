@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Tuple
+
 import torch
 from torch.nn import Module
 import torch.nn.functional as F
@@ -30,6 +34,7 @@ class RectifiedFlow(Module):
             rtol = 1e-5,
             method = 'midpoint'
         ),
+        data_shape: Tuple[int, ...] | None = None,
     ):
         super().__init__()
         self.model = model
@@ -38,7 +43,7 @@ class RectifiedFlow(Module):
         # sampling
 
         self.odeint_kwargs = odeint_kwargs
-        self.data_shape = None
+        self.data_shape = data_shape
 
     @property
     def device(self):
@@ -46,12 +51,13 @@ class RectifiedFlow(Module):
 
     def sample(
         self,
-        shape = None,
         batch_size = 1,
         steps = 16,
+        data_shape: Tuple[int, ...] | None = None,
         **model_kwargs
     ):
-        shape = default(shape, self.data_shape)
+        data_shape = default(data_shape, self.data_shape)
+        assert exists(data_shape), 'you need to either pass in a `data_shape` or have trained at least with one forward'
 
         def fn(times, x):
             time_kwarg = self.time_cond_kwarg
@@ -61,7 +67,7 @@ class RectifiedFlow(Module):
 
             return self.model(x, **model_kwargs)
 
-        y0 = torch.randn((batch_size, *shape))
+        y0 = torch.randn((batch_size, *data_shape))
 
         t = torch.linspace(0., 1., steps, device = self.device)
 
@@ -75,7 +81,9 @@ class RectifiedFlow(Module):
         data,
         **model_kwargs
     ):
-        batch, *self.data_shape = data.shape
+        batch, *data_shape = data.shape
+
+        self.data_shape = default(self.data_shape, data_shape)
 
         # x0 - gaussian noise, x1 - data
 
