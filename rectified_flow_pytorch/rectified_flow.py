@@ -2,6 +2,8 @@ import torch
 from torch.nn import Module
 import torch.nn.functional as F
 
+from torchdiffeq import odeint
+
 # helpers
 
 def exists(v):
@@ -22,20 +24,58 @@ class RectifiedFlow(Module):
     def __init__(
         self,
         model: Module,
-        time_cond_kwarg = 'times'
+        time_cond_kwarg = 'times',
+        odeint_kwargs: dict = dict(
+            atol = 1e-5,
+            rtol = 1e-5,
+            method = 'midpoint'
+        ),
     ):
         super().__init__()
         self.model = model
         self.time_cond_kwarg = time_cond_kwarg # whether the model is to be conditioned on the times
 
-    def sample(self):
-        raise NotImplementedError
+        # sampling
+
+        self.odeint_kwargs = odeint_kwargs
+        self.data_shape = None
+
+    @property
+    def device(self):
+        return next(self.model.parameters()).device
+
+    def sample(
+        self,
+        shape = None,
+        batch_size = 1,
+        steps = 16,
+        **model_kwargs
+    ):
+        shape = default(shape, self.data_shape)
+
+        def fn(times, x):
+            time_kwarg = self.time_cond_kwarg
+
+            if exists(time_kwarg):
+                model_kwargs.update(**{time_kwarg: times})
+
+            return self.model(x, **model_kwargs)
+
+        y0 = torch.randn((batch_size, *shape))
+
+        t = torch.linspace(0., 1., steps, device = self.device)
+
+        trajectory = odeint(fn, y0, t, **self.odeint_kwargs)
+
+        sampled = trajectory[-1]
+        return sampled
 
     def forward(
         self,
-        data
+        data,
+        **model_kwargs
     ):
-        batch, device = data.shape[0], data.device
+        batch, *self.data_shape = data.shape
 
         # x0 - gaussian noise, x1 - data
 
@@ -43,7 +83,7 @@ class RectifiedFlow(Module):
 
         # times, and times with dimension padding on right
 
-        times = torch.rand(batch, device = device)
+        times = torch.rand(batch, device = self.device)
         padded_times = append_dims(times, data.ndim - 1)
 
         # Algorithm 2 in paper
@@ -53,14 +93,13 @@ class RectifiedFlow(Module):
         noised = padded_times * data + (1. - padded_times) * noise
 
         # prepare maybe time conditioning for model
-
-        model_kwargs = dict()
+        
         time_kwarg = self.time_cond_kwarg
 
         if exists(time_kwarg):
             model_kwargs.update(**{time_kwarg: times})
 
-        # the model predicts the flow from the noised
+        # the model predicts the flow from the noised data
 
         flow = data - noise
         pred_flow = self.model(noised, **model_kwargs)
