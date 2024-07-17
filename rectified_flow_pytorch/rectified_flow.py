@@ -28,7 +28,7 @@ class RectifiedFlow(Module):
     def __init__(
         self,
         model: Module,
-        time_cond_kwarg = 'times',
+        time_cond_kwarg: str | None = 'times',
         odeint_kwargs: dict = dict(
             atol = 1e-5,
             rtol = 1e-5,
@@ -85,6 +85,7 @@ class RectifiedFlow(Module):
     def forward(
         self,
         data,
+        noise = None,
         **model_kwargs
     ):
         batch, *data_shape = data.shape
@@ -93,7 +94,7 @@ class RectifiedFlow(Module):
 
         # x0 - gaussian noise, x1 - data
 
-        noise = torch.randn_like(data)
+        noise = default(noise, torch.randn_like(data))
 
         # times, and times with dimension padding on right
 

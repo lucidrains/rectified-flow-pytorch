@@ -2,6 +2,33 @@
 
 Implementation of rectified flow and some of its followup research / improvements in Pytorch
 
+## Install
+
+```bash
+$ pip install rectified-flow-pytorch
+```
+
+## Usage
+
+```python
+import torch
+from torch import nn
+
+from rectified_flow_pytorch import RectifiedFlow
+
+model = nn.Conv2d(3, 3, 1)
+
+rectified_flow = RectifiedFlow(model, time_cond_kwarg = None)
+
+images = torch.randn(1, 3, 256, 256)
+
+loss = rectified_flow(images)
+loss.backward()
+
+sampled = rectified_flow.sample()
+assert sampled.shape == images.shape
+```
+
 ## Citations
 
 ```bibtex
