@@ -23,7 +23,9 @@ classifiers=[
 
 dependencies = [
     'einops>=0.8.0',
+    'scipy',
     'torch>=2.0',
+    'torchdiffeq',
 ]
 
 [project.urls]
