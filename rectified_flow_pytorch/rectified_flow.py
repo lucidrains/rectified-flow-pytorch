@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Tuple
+from typing import Tuple, Literal
 from copy import deepcopy
 
 import torch
@@ -34,11 +34,19 @@ class RectifiedFlow(Module):
             rtol = 1e-5,
             method = 'midpoint'
         ),
+        loss_type: Literal[
+            'mse',
+            'pseudo_huber'
+        ] = 'mse',
         data_shape: Tuple[int, ...] | None = None,
     ):
         super().__init__()
         self.model = model
         self.time_cond_kwarg = time_cond_kwarg # whether the model is to be conditioned on the times
+
+        # loss type
+
+        self.loss_type = loss_type
 
         # sampling
 
@@ -126,7 +134,18 @@ class RectifiedFlow(Module):
         flow = data - noise
         pred_flow = self.model(noised, **model_kwargs)
 
-        loss = F.mse_loss(pred_flow, flow)
+        # loss
+        # section 4.2 of https://arxiv.org/abs/2405.20320v1
+
+        if self.loss_type == 'mse':
+            loss = F.mse_loss(pred_flow, flow)
+
+        elif self.loss_type == 'pseudo_huber':
+            c = .00054 * data_shape[0]
+            loss = (F.mse_loss(pred_flow, flow) + c ** 2).sqrt() - c
+
+        else:
+            raise ValueError(f'unrecognized loss type {self.loss_type}')
 
         return loss
 
