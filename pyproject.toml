@@ -23,6 +23,7 @@ classifiers=[
 
 dependencies = [
     'einops>=0.8.0',
+    'ema-pytorch>=0.5.1',
     'scipy',
     'torch>=2.0',
     'torchdiffeq',
