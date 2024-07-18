@@ -26,7 +26,7 @@ loss = rectified_flow(images)
 loss.backward()
 
 sampled = rectified_flow.sample()
-assert sampled.shape == images.shape
+assert sampled[1:].shape == images[1:].shape
 ```
 
 For reflow as described in the paper
@@ -46,17 +46,17 @@ images = torch.randn(1, 3, 256, 256)
 loss = rectified_flow(images)
 loss.backward()
 
-# first train on many images
+# do the above for many real images
 
 reflow = Reflow(rectified_flow)
 
 reflow_loss = reflow()
 reflow_loss.backward()
 
-# then do the above in a loop many times
+# then do the above in a loop many times for reflow - you can reflow multiple times by redefining Reflow(reflow.model) and looping again
 
 sampled = reflow.sample()
-assert sampled.shape == images.shape
+assert sampled[1:].shape == images[1:].shape
 ```
 
 ## Citations
