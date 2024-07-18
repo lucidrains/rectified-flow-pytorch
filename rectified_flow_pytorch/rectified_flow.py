@@ -148,7 +148,13 @@ class Reflow(Module):
         self.data_shape = data_shape
 
         self.model = rectified_flow
+
+        # make a frozen copy of the model and set requires grad to be False for all parameters for safe measure
+
         self.frozen_model = deepcopy(rectified_flow)
+
+        for p in self.frozen_model.parameters():
+            p.detach_()
 
     def parameters(self):
         return self.model.parameters() # omit frozen model
