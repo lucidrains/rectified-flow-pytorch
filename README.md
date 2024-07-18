@@ -26,7 +26,7 @@ loss = rectified_flow(images)
 loss.backward()
 
 sampled = rectified_flow.sample()
-assert sampled[1:].shape == images[1:].shape
+assert sampled.shape[1:] == images.shape[1:]
 ```
 
 For reflow as described in the paper
@@ -56,7 +56,7 @@ reflow_loss.backward()
 # then do the above in a loop many times for reflow - you can reflow multiple times by redefining Reflow(reflow.model) and looping again
 
 sampled = reflow.sample()
-assert sampled[1:].shape == images[1:].shape
+assert sampled.shape[1:] == images.shape[1:]
 ```
 
 ## Citations
