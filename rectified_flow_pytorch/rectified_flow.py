@@ -155,6 +155,7 @@ class Reflow(Module):
     def __init__(
         self,
         rectified_flow: RectifiedFlow,
+        frozen_model: RectifiedFlow | None = None,
         *,
         batch_size = 16,
 
@@ -168,12 +169,15 @@ class Reflow(Module):
 
         self.model = rectified_flow
 
-        # make a frozen copy of the model and set requires grad to be False for all parameters for safe measure
+        if not exists(frozen_model):
+            # make a frozen copy of the model and set requires grad to be False for all parameters for safe measure
 
-        self.frozen_model = deepcopy(rectified_flow)
+            frozen_model = deepcopy(rectified_flow)
 
-        for p in self.frozen_model.parameters():
-            p.detach_()
+            for p in frozen_model.parameters():
+                p.detach_()
+
+        self.frozen_model = frozen_model
 
     def parameters(self):
         return self.model.parameters() # omit frozen model
