@@ -1,6 +1,6 @@
 from __future__ import annotations
-
 from typing import Tuple
+from copy import deepcopy
 
 import torch
 from torch.nn import Module
@@ -49,13 +49,18 @@ class RectifiedFlow(Module):
     def device(self):
         return next(self.model.parameters()).device
 
+    @torch.no_grad()
     def sample(
         self,
         batch_size = 1,
         steps = 16,
+        noise = None,
         data_shape: Tuple[int, ...] | None = None,
         **model_kwargs
     ):
+        was_training = self.training
+        self.eval()
+
         data_shape = default(data_shape, self.data_shape)
         assert exists(data_shape), 'you need to either pass in a `data_shape` or have trained at least with one forward'
 
@@ -69,7 +74,7 @@ class RectifiedFlow(Module):
 
         # start with random gaussian noise - y0
 
-        noise = torch.randn((batch_size, *data_shape))
+        noise = default(noise, torch.randn((batch_size, *data_shape)))
 
         # time steps
 
@@ -80,6 +85,8 @@ class RectifiedFlow(Module):
         trajectory = odeint(ode_fn, noise, times, **self.odeint_kwargs)
 
         sampled_data = trajectory[-1]
+
+        self.train(was_training)
         return sampled_data
 
     def forward(
@@ -120,5 +127,42 @@ class RectifiedFlow(Module):
         pred_flow = self.model(noised, **model_kwargs)
 
         loss = F.mse_loss(pred_flow, flow)
+
+        return loss
+
+# reflow wrapper
+
+class Reflow(Module):
+    def __init__(
+        self,
+        rectified_flow: RectifiedFlow,
+        *,
+        batch_size = 16,
+
+    ):
+        super().__init__()
+        model, data_shape = rectified_flow.model, rectified_flow.data_shape
+        assert exists(data_shape), '`data_shape` must be defined in RectifiedFlow'
+
+        self.batch_size = batch_size
+        self.data_shape = data_shape
+
+        self.model = rectified_flow
+        self.frozen_model = deepcopy(rectified_flow)
+
+    def parameters(self):
+        return self.model.parameters() # omit frozen model
+
+    def sample(self, *args, **kwargs):
+        return self.model.sample(*args, **kwargs)
+
+    def forward(self):
+
+        noise = torch.randn((self.batch_size, *self.data_shape))
+        sampled_output = self.frozen_model.sample(noise = noise)
+
+        # the coupling in the paper is (noise, sampled_output)
+
+        loss = self.model(sampled_output, noise = noise)
 
         return loss

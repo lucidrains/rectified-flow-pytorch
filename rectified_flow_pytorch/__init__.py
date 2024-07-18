@@ -1,1 +1,1 @@
-from rectified_flow_pytorch.rectified_flow import RectifiedFlow
+from rectified_flow_pytorch.rectified_flow import RectifiedFlow, Reflow
