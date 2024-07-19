@@ -1,6 +1,6 @@
 [project]
 name = "rectified-flow-pytorch"
-version = "0.0.6"
+version = "0.0.7"
 description = "Rectified Flow in Pytorch"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
