@@ -30,6 +30,14 @@ def append_dims(t, ndims):
     shape = t.shape
     return t.reshape(*shape, *((1,) * ndims))
 
+# normalizing helpers
+
+def normalize_to_neg_one_to_one(img):
+    return img * 2 - 1
+
+def unnormalize_to_zero_to_one(t):
+    return (t + 1) * 0.5
+
 # losses
 
 class LPIPSLoss(Module):
@@ -100,7 +108,9 @@ class RectifiedFlow(Module):
         loss_fn: Literal['mse', 'pseudo_huber'] | Module = 'mse',
         loss_fn_kwargs: dict = dict(),
         data_shape: Tuple[int, ...] | None = None,
-        immiscible = False
+        immiscible = False,
+        data_normalize_fn = normalize_to_neg_one_to_one,
+        data_unnormalize_fn = unnormalize_to_zero_to_one
     ):
         super().__init__()
         self.model = model
@@ -134,6 +144,11 @@ class RectifiedFlow(Module):
         # immiscible diffusion paper, will be removed if does not work
 
         self.immiscible = immiscible
+
+        # normalizing fn
+
+        self.data_normalize_fn = data_normalize_fn
+        self.data_unnormalize_fn = data_unnormalize_fn
 
     @property
     def device(self):
@@ -177,7 +192,8 @@ class RectifiedFlow(Module):
         sampled_data = trajectory[-1]
 
         self.train(was_training)
-        return sampled_data
+
+        return self.data_unnormalize_fn(sampled_data)
 
     def forward(
         self,
@@ -186,6 +202,8 @@ class RectifiedFlow(Module):
         **model_kwargs
     ):
         batch, *data_shape = data.shape
+
+        data = self.data_normalize_fn(data)
 
         self.data_shape = default(self.data_shape, data_shape)
 
