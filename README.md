@@ -1,4 +1,4 @@
-<img src="./rf.gif" width="400px"></img>
+<img src="./rf.png" width="400px"></img>
 
 ## Rectified Flow - Pytorch (wip)
 
