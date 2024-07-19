@@ -24,6 +24,9 @@ def exists(v):
 def default(v, d):
     return v if exists(v) else d
 
+def identity(t):
+    return t
+
 # tensor helpers
 
 def append_dims(t, ndims):
@@ -147,8 +150,8 @@ class RectifiedFlow(Module):
 
         # normalizing fn
 
-        self.data_normalize_fn = data_normalize_fn
-        self.data_unnormalize_fn = data_unnormalize_fn
+        self.data_normalize_fn = default(data_normalize_fn, identity)
+        self.data_unnormalize_fn = default(data_unnormalize_fn, identity)
 
     @property
     def device(self):
