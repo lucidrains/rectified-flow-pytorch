@@ -14,6 +14,8 @@ from torchvision.models import VGG16_Weights
 
 from einops import reduce, rearrange
 
+from scipy.optimize import linear_sum_assignment
+
 # helpers
 
 def exists(v):
@@ -98,6 +100,7 @@ class RectifiedFlow(Module):
         loss_fn: Literal['mse', 'pseudo_huber'] | Module = 'mse',
         loss_fn_kwargs: dict = dict(),
         data_shape: Tuple[int, ...] | None = None,
+        immiscible = False
     ):
         super().__init__()
         self.model = model
@@ -127,6 +130,10 @@ class RectifiedFlow(Module):
 
         self.odeint_kwargs = odeint_kwargs
         self.data_shape = data_shape
+
+        # immiscible diffusion paper, will be removed if does not work
+
+        self.immiscible = immiscible
 
     @property
     def device(self):
@@ -185,6 +192,13 @@ class RectifiedFlow(Module):
         # x0 - gaussian noise, x1 - data
 
         noise = default(noise, torch.randn_like(data))
+
+        # maybe immiscible flow
+
+        if self.immiscible:
+            cost = torch.cdist(data.flatten(1), noise.flatten(1))
+            _, reorder_indices = linear_sum_assignment(cost)
+            noise = noise[reorder_indices]
 
         # times, and times with dimension padding on right
 
