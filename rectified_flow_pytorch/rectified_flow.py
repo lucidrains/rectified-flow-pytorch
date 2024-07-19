@@ -3,10 +3,16 @@ from typing import Tuple, Literal
 from copy import deepcopy
 
 import torch
+from torch import nn
 from torch.nn import Module
 import torch.nn.functional as F
 
 from torchdiffeq import odeint
+
+import torchvision
+from torchvision.models import VGG16_Weights
+
+from einops import reduce, rearrange
 
 # helpers
 
@@ -22,6 +28,61 @@ def append_dims(t, ndims):
     shape = t.shape
     return t.reshape(*shape, *((1,) * ndims))
 
+# losses
+
+class LPIPSLoss(Module):
+    def __init__(
+        self,
+        vgg: Module | None = None,
+        vgg_weights: VGG16_Weights = VGG16_Weights.DEFAULT,
+    ):
+        super().__init__()
+
+        if not exists(vgg):
+            vgg = torchvision.models.vgg16(weights = vgg_weights)
+            vgg.classifier = nn.Sequential(*vgg.classifier[:-2])
+
+        self.vgg = vgg
+
+    def forward(self, pred_data, data, reduction = 'mean'):
+        embed = self.vgg(data)
+        pred_embed = self.vgg(pred_data)
+        loss = F.mse_loss(embed, pred_embed, reduction = reduction)
+
+        if reduction == 'none':
+            loss = reduce(loss, 'b ... -> b', 'mean')
+
+        return loss
+
+class PseudoHuberLoss(Module):
+    def __init__(self, data_dim: int):
+        super().__init__()
+        self.data_dim = data_dim
+
+    def forward(self, pred, target, reduction = 'mean', **kwargs):
+        c = .00054 * self.data_dim
+        loss = (F.mse_loss(pred, target, reduction = reduction) + c * c).sqrt() - c
+        return loss
+
+class PseudoHuberLossWithLPIPS(Module):
+    def __init__(self, data_dim: int, lpips_kwargs: dict = dict()):
+        super().__init__()
+        self.pseudo_huber = PseudoHuberLoss(data_dim)
+        self.lpips = LPIPSLoss(**lpips_kwargs)
+
+    def forward(self, pred_flow, target_flow, *, times, data):
+        huber_loss = self.pseudo_huber(pred_flow, target_flow, reduction = 'none')
+
+        pred_data = pred_flow * times
+        lpips_loss = self.lpips(data, pred_data, reduction = 'none')
+
+        time_weighted_loss = huber_loss * (1 - times) + lpips_loss * (1. / times.clamp(min = 1e-2))
+        return time_weighted_loss.mean()
+
+class MSELoss(Module):
+    def forward(self, pred, target, **kwargs):
+        return F.mse_loss(pred, target)
+
 # main class
 
 class RectifiedFlow(Module):
@@ -34,19 +95,33 @@ class RectifiedFlow(Module):
             rtol = 1e-5,
             method = 'midpoint'
         ),
-        loss_type: Literal[
-            'mse',
-            'pseudo_huber'
-        ] = 'mse',
+        loss_fn: Literal['mse', 'pseudo_huber'] | Module = 'mse',
+        loss_fn_kwargs: dict = dict(),
         data_shape: Tuple[int, ...] | None = None,
     ):
         super().__init__()
         self.model = model
         self.time_cond_kwarg = time_cond_kwarg # whether the model is to be conditioned on the times
 
-        # loss type
+        # loss fn
 
-        self.loss_type = loss_type
+        if isinstance(loss_fn, Module):
+            loss_fn = loss_fn
+
+        elif loss_fn == 'mse':
+            loss_fn = MSELoss()
+
+        elif loss_fn == 'pseudo_huber':
+            # section 4.2 of https://arxiv.org/abs/2405.20320v1
+            loss_fn = PseudoHuberLoss(**loss_fn_kwargs)
+
+        elif loss_fn == 'pseudo_huber_with_lpips':
+            loss_fn = PseudoHuberLossWithLPIPS(**loss_fn_kwargs)
+
+        else:
+            raise ValueError(f'unkwown loss function {loss_fn}')
+
+        self.loss_fn = loss_fn
 
         # sampling
 
@@ -135,17 +210,8 @@ class RectifiedFlow(Module):
         pred_flow = self.model(noised, **model_kwargs)
 
         # loss
-        # section 4.2 of https://arxiv.org/abs/2405.20320v1
 
-        if self.loss_type == 'mse':
-            loss = F.mse_loss(pred_flow, flow)
-
-        elif self.loss_type == 'pseudo_huber':
-            c = .00054 * data_shape[0]
-            loss = (F.mse_loss(pred_flow, flow) + c ** 2).sqrt() - c
-
-        else:
-            raise ValueError(f'unrecognized loss type {self.loss_type}')
+        loss = self.loss_fn(pred_flow, flow, times = times, data = data)
 
         return loss
 
