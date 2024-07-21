@@ -736,7 +736,7 @@ class Trainer(Module):
 
         self.model = rectified_flow
         self.optimizer = Adam(rectified_flow.parameters(), lr = learning_rate, **adam_kwargs)
-        self.dl = DataLoader(dataset, batch_size = batch_size)
+        self.dl = DataLoader(dataset, batch_size = batch_size, shuffle = True, drop_last = True)
 
         self.model, self.optimizer, self.dl = self.accelerator.prepare(self.model, self.optimizer, self.dl)
 
