@@ -22,8 +22,10 @@ classifiers=[
   ]
 
 dependencies = [
+    'accelerate',
     'einops>=0.8.0',
     'ema-pytorch>=0.5.1',
+    'pillow',
     'scipy',
     'torch>=2.0',
     'torchvision',
