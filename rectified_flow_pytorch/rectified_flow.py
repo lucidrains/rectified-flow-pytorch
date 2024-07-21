@@ -14,6 +14,7 @@ import torchvision
 from torchvision.utils import save_image
 from torchvision.models import VGG16_Weights
 
+import einx
 from einops import einsum, reduce, rearrange, repeat
 from einops.layers.torch import Rearrange
 
@@ -348,7 +349,7 @@ class SinusoidalPosEmb(Module):
         half_dim = self.dim // 2
         emb = math.log(self.theta) / (half_dim - 1)
         emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
-        emb = x[:, None] * emb[None, :]
+        emb = einx.multiply('i, j -> i j', x, emb)
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
         return emb
 
@@ -440,9 +441,9 @@ class LinearAttention(Module):
         x = self.norm(x)
 
         qkv = self.to_qkv(x).chunk(3, dim = 1)
-        q, k, v = map(lambda t: rearrange(t, 'b (h c) x y -> b h c (x y)', h = self.heads), qkv)
+        q, k, v = tuple(rearrange(t, 'b (h c) x y -> b h c (x y)', h = self.heads) for t in qkv)
 
-        mk, mv = map(lambda t: repeat(t, 'h c n -> b h c n', b = b), self.mem_kv)
+        mk, mv = tuple(repeat(t, 'h c n -> b h c n', b = b) for t in self.mem_kv)
         k, v = map(partial(torch.cat, dim = -1), ((mk, k), (mv, v)))
 
         q = q.softmax(dim = -2)
@@ -474,7 +475,7 @@ class Attention(Module):
 
         self.mem_kv = nn.Parameter(torch.randn(2, heads, num_mem_kv, dim_head))
         self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, 1, bias = False)
-        self.to_out = nn.Conv2d(hidden_dim, dim, 1)
+        self.to_out = nn.Conv2d(hidden_dim, dim, 1, bias = False)
 
     def forward(self, x):
         b, c, h, w = x.shape
@@ -493,7 +494,6 @@ class Attention(Module):
         attn = sim.softmax(dim = -1)
         out = einsum(attn, v, 'b h i j, b h j d -> b h i d')
 
-
         out = rearrange(out, 'b h (x y) d -> b (h d) x y', x = h, y = w)
         return self.to_out(out)
 
@@ -505,7 +505,7 @@ class Unet(Module):
         dim,
         init_dim = None,
         out_dim = None,
-        dim_mults = (1, 2, 4, 8),
+        dim_mults: Tuple[int, ...] = (1, 2, 4, 8),
         channels = 3,
         learned_variance = False,
         learned_sinusoidal_cond = False,
@@ -612,7 +612,7 @@ class Unet(Module):
     def downsample_factor(self):
         return 2 ** (len(self.downs) - 1)
 
-    def forward(self, x, times, x_self_cond = None):
+    def forward(self, x, times):
         assert all([divisible_by(d, self.downsample_factor) for d in x.shape[-2:]]), f'your input dimensions {x.shape[-2:]} need to be divisible by {self.downsample_factor}, given the unet'
 
         x = self.init_conv(x)
