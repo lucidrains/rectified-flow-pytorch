@@ -182,7 +182,7 @@ class RectifiedFlow(Module):
 
         # start with random gaussian noise - y0
 
-        noise = default(noise, torch.randn((batch_size, *data_shape)))
+        noise = default(noise, torch.randn((batch_size, *data_shape), device = self.device))
 
         # time steps
 
@@ -280,6 +280,9 @@ class Reflow(Module):
 
         self.frozen_model = frozen_model
 
+    def device(self):
+        return next(self.parameters()).device
+
     def parameters(self):
         return self.model.parameters() # omit frozen model
 
@@ -288,7 +291,7 @@ class Reflow(Module):
 
     def forward(self):
 
-        noise = torch.randn((self.batch_size, *self.data_shape))
+        noise = torch.randn((self.batch_size, *self.data_shape), device = self.device)
         sampled_output = self.frozen_model.sample(noise = noise)
 
         # the coupling in the paper is (noise, sampled_output)
