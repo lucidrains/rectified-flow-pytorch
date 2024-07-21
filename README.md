@@ -61,6 +61,30 @@ sampled = reflow.sample()
 assert sampled.shape[1:] == images.shape[1:]
 ```
 
+With a `Trainer` based on `accelerate`
+
+```python
+import torch
+from rectified_flow_pytorch import RectifiedFlow, ImageDataset, Unet, Trainer
+
+model = Unet(dim = 64)
+
+rectified_flow = RectifiedFlow(model)
+
+img_dataset = ImageDataset(
+    folder = './jpg',
+    image_size = 256
+)
+
+trainer = Trainer(
+    rectified_flow,
+    dataset = img_dataset,
+    num_train_steps = 70_000
+)
+
+trainer()
+```
+
 ## Citations
 
 ```bibtex

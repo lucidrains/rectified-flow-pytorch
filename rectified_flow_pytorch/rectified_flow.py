@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from torchdiffeq import odeint
 
 import torchvision
+from torchvision.utils import save_image
 from torchvision.models import VGG16_Weights
 
 from einops import einsum, reduce, rearrange, repeat
@@ -726,7 +727,9 @@ class Trainer(Module):
         adam_kwargs: dict = dict(),
         accelerate_kwargs: dict = dict(),
         checkpoints_folder: str = './checkpoints',
-        results_folder: str = './results'
+        results_folder: str = './results',
+        save_results_every: int = 100,
+        num_samples: int = 16
     ):
         super().__init__()
         self.accelerator = Accelerator(**accelerate_kwargs)
@@ -745,6 +748,12 @@ class Trainer(Module):
         self.checkpoints_folder.mkdir(exist_ok = True, parents = True)
         self.results_folder.mkdir(exist_ok = True, parents = True)
 
+        self.save_results_every = save_results_every
+
+        self.num_sample_rows = int(math.sqrt(num_samples))
+        assert (self.num_sample_rows ** 2) == num_samples, f'{num_samples} must be a square'
+        self.num_samples = num_samples
+
         assert self.checkpoints_folder.is_dir()
         assert self.results_folder.is_dir()
 
@@ -752,17 +761,33 @@ class Trainer(Module):
 
         dl = cycle(self.dl)
 
-        for _ in range(self.num_train_steps):
+        for ind in range(self.num_train_steps):
+            step = ind + 1
+
             self.model.train()
 
             data = next(dl)
             loss = self.model(data)
 
-            self.accelerator.print(f'loss: {loss.item():.3f}')
+            self.accelerator.print(f'[{step}] loss: {loss.item():.3f}')
             self.accelerator.backward(loss)
 
             self.optimizer.step()
             self.optimizer.zero_grad()
+
+            if not divisible_by(step, self.save_results_every):
+                continue
+
+            self.accelerator.wait_for_everyone()
+
+            if self.accelerator.is_main_process:
+                self.model.eval()
+                sampled = self.model.sample(batch_size = self.num_samples)
+                sampled.clamp_(0., 1.)
+
+                save_image(sampled, str(self.results_folder / f'results.{step}.png'), nrow = self.num_sample_rows)
+
+            self.accelerator.wait_for_everyone()
 
         print('training complete')
 
