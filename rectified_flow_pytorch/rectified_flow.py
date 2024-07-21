@@ -672,7 +672,7 @@ class ImageDataset(Dataset):
         if isinstance(folder, str):
             folder = Path(folder)
 
-        assert folder.exists() and folder.is_dir()
+        assert folder.is_dir()
 
         self.folder = folder
         self.image_size = image_size
@@ -707,21 +707,62 @@ class ImageDataset(Dataset):
 
 from torch.optim import Adam
 from accelerate import Accelerator
+from torch.utils.data import DataLoader
 
-class Trainer:
+def cycle(dl):
+    while True:
+        for batch in dl:
+            yield batch
+
+class Trainer(Module):
     def __init__(
         self,
         rectified_flow: RectifiedFlow,
         *,
         dataset: Dataset,
         num_train_steps = 70_000,
-        learning_rate: 3e-4,
+        learning_rate = 3e-4,
+        batch_size = 16,
         adam_kwargs: dict = dict(),
         accelerate_kwargs: dict = dict(),
         checkpoints_folder: str = './checkpoints',
         results_folder: str = './results'
     ):
-        return self
+        super().__init__()
+        self.accelerator = Accelerator(**accelerate_kwargs)
 
-    def __call__(self):
-        return self
+        self.model = rectified_flow
+        self.optimizer = Adam(rectified_flow.parameters(), lr = learning_rate, **adam_kwargs)
+        self.dl = DataLoader(dataset, batch_size = batch_size)
+
+        self.model, self.optimizer, self.dl = self.accelerator.prepare(self.model, self.optimizer, self.dl)
+
+        self.num_train_steps = num_train_steps
+
+        self.checkpoints_folder = Path(checkpoints_folder)
+        self.results_folder = Path(results_folder)
+
+        self.checkpoints_folder.mkdir(exist_ok = True, parents = True)
+        self.results_folder.mkdir(exist_ok = True, parents = True)
+
+        assert self.checkpoints_folder.is_dir()
+        assert self.results_folder.is_dir()
+
+    def forward(self):
+
+        dl = cycle(self.dl)
+
+        for _ in range(self.num_train_steps):
+            self.model.train()
+
+            data = next(dl)
+            loss = self.model(data)
+
+            self.accelerator.print(f'loss: {loss.item():.3f}')
+            self.accelerator.backward(loss)
+
+            self.optimizer.step()
+            self.optimizer.zero_grad()
+
+        print('training complete')
+
