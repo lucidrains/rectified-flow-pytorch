@@ -72,14 +72,15 @@ model = Unet(dim = 64)
 rectified_flow = RectifiedFlow(model)
 
 img_dataset = ImageDataset(
-    folder = './jpg',
+    folder = './path/to/your/images',
     image_size = 256
 )
 
 trainer = Trainer(
     rectified_flow,
     dataset = img_dataset,
-    num_train_steps = 70_000
+    num_train_steps = 70_000,
+    results_folder = './results'   # samples will be saved periodically to this folder
 )
 
 trainer()
