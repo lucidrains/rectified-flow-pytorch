@@ -739,7 +739,13 @@ class Trainer(Module):
         self.model = rectified_flow
 
         if self.is_main:
-            self.ema_model = EMA(self.model, **ema_kwargs)
+            self.ema_model = EMA(
+                self.model,
+                forward_method_names = ('sample',),
+                **ema_kwargs
+            )
+
+            self.ema_model.to(self.accelerator.device)
 
         self.optimizer = Adam(rectified_flow.parameters(), lr = learning_rate, **adam_kwargs)
         self.dl = DataLoader(dataset, batch_size = batch_size, shuffle = True, drop_last = True)
@@ -794,6 +800,8 @@ class Trainer(Module):
             self.accelerator.wait_for_everyone()
 
             if self.is_main:
+                self.ema_model.ema_model.data_shape = self.model.data_shape
+
                 with torch.no_grad():
                     sampled = self.ema_model.sample(batch_size = self.num_samples)
 
