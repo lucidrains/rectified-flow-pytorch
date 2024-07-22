@@ -4,7 +4,7 @@ from copy import deepcopy
 from typing import Tuple, List, Literal
 
 import torch
-from torch import nn
+from torch import nn, from_numpy
 from torch.nn import Module, ModuleList
 import torch.nn.functional as F
 
@@ -223,8 +223,8 @@ class RectifiedFlow(Module):
 
         if self.immiscible:
             cost = torch.cdist(data.flatten(1), noise.flatten(1))
-            _, reorder_indices = linear_sum_assignment(cost)
-            noise = noise[reorder_indices]
+            _, reorder_indices = linear_sum_assignment(cost.cpu())
+            noise = noise[from_numpy(reorder_indices).to(cost.device)]
 
         # times, and times with dimension padding on right
 
