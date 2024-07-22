@@ -3,5 +3,6 @@ from rectified_flow_pytorch.rectified_flow import (
     Reflow,
     ImageDataset,
     Unet,
-    Trainer
+    Trainer,
+    ReflowTrainer
 )
