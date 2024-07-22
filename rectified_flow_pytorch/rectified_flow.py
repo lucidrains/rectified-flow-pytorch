@@ -709,6 +709,7 @@ class ImageDataset(Dataset):
 from torch.optim import Adam
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
+from ema_pytorch import EMA
 
 def cycle(dl):
     while True:
@@ -724,17 +725,22 @@ class Trainer(Module):
         num_train_steps = 70_000,
         learning_rate = 3e-4,
         batch_size = 16,
-        adam_kwargs: dict = dict(),
-        accelerate_kwargs: dict = dict(),
         checkpoints_folder: str = './checkpoints',
         results_folder: str = './results',
         save_results_every: int = 100,
-        num_samples: int = 16
+        num_samples: int = 16,
+        adam_kwargs: dict = dict(),
+        accelerate_kwargs: dict = dict(),
+        ema_kwargs: dict = dict()
     ):
         super().__init__()
         self.accelerator = Accelerator(**accelerate_kwargs)
 
         self.model = rectified_flow
+
+        if self.is_main:
+            self.ema_model = EMA(self.model, **ema_kwargs)
+
         self.optimizer = Adam(rectified_flow.parameters(), lr = learning_rate, **adam_kwargs)
         self.dl = DataLoader(dataset, batch_size = batch_size, shuffle = True, drop_last = True)
 
@@ -757,6 +763,10 @@ class Trainer(Module):
         assert self.checkpoints_folder.is_dir()
         assert self.results_folder.is_dir()
 
+    @property
+    def is_main(self):
+        return self.accelerator.is_main_process
+
     def forward(self):
 
         dl = cycle(self.dl)
@@ -775,16 +785,19 @@ class Trainer(Module):
             self.optimizer.step()
             self.optimizer.zero_grad()
 
+            if self.is_main:
+                self.ema_model.update()
+
             if not divisible_by(step, self.save_results_every):
                 continue
 
             self.accelerator.wait_for_everyone()
 
-            if self.accelerator.is_main_process:
-                self.model.eval()
-                sampled = self.model.sample(batch_size = self.num_samples)
-                sampled.clamp_(0., 1.)
+            if self.is_main:
+                with torch.no_grad():
+                    sampled = self.ema_model.sample(batch_size = self.num_samples)
 
+                sampled.clamp_(0., 1.)
                 save_image(sampled, str(self.results_folder / f'results.{step}.png'), nrow = self.num_sample_rows)
 
             self.accelerator.wait_for_everyone()
