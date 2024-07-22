@@ -59,11 +59,14 @@ class LPIPSLoss(Module):
             vgg = torchvision.models.vgg16(weights = vgg_weights)
             vgg.classifier = nn.Sequential(*vgg.classifier[:-2])
 
-        self.vgg = vgg
+        self.vgg = [vgg]
 
     def forward(self, pred_data, data, reduction = 'mean'):
-        embed = self.vgg(data)
-        pred_embed = self.vgg(pred_data)
+        vgg, = self.vgg
+        vgg = vgg.to(data.device)
+
+        pred_embed, embed = map(vgg, (pred_data, data))
+
         loss = F.mse_loss(embed, pred_embed, reduction = reduction)
 
         if reduction == 'none':
@@ -112,7 +115,11 @@ class RectifiedFlow(Module):
             rtol = 1e-5,
             method = 'midpoint'
         ),
-        loss_fn: Literal['mse', 'pseudo_huber'] | Module = 'mse',
+        loss_fn: Literal[
+            'mse',
+            'pseudo_huber',
+            'pseudo_huber_with_lpips'
+        ] | Module = 'mse',
         loss_fn_kwargs: dict = dict(),
         data_shape: Tuple[int, ...] | None = None,
         immiscible = False,
