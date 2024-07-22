@@ -728,6 +728,7 @@ class Trainer(Module):
         checkpoints_folder: str = './checkpoints',
         results_folder: str = './results',
         save_results_every: int = 100,
+        checkpoint_every: int = 1000,
         num_samples: int = 16,
         adam_kwargs: dict = dict(),
         accelerate_kwargs: dict = dict(),
@@ -760,6 +761,7 @@ class Trainer(Module):
         self.checkpoints_folder.mkdir(exist_ok = True, parents = True)
         self.results_folder.mkdir(exist_ok = True, parents = True)
 
+        self.checkpoint_every = checkpoint_every
         self.save_results_every = save_results_every
 
         self.num_sample_rows = int(math.sqrt(num_samples))
@@ -772,6 +774,18 @@ class Trainer(Module):
     @property
     def is_main(self):
         return self.accelerator.is_main_process
+
+    def save(self, path):
+        if not self.is_main:
+            return
+
+        save_package = dict(
+            model = self.accelerator.unwrap_model(self.model).state_dict(),
+            ema_model = self.ema_model.state_dict(),
+            optimizer = self.accelerator.unwrap_model(self.optimizer).state_dict(),
+        )
+
+        torch.save(save_package, str(self.checkpoints_folder / path))
 
     def forward(self):
 
@@ -794,19 +808,20 @@ class Trainer(Module):
             if self.is_main:
                 self.ema_model.update()
 
-            if not divisible_by(step, self.save_results_every):
-                continue
-
             self.accelerator.wait_for_everyone()
 
             if self.is_main:
-                self.ema_model.ema_model.data_shape = self.model.data_shape
+                if divisible_by(step, self.save_results_every):
+                    self.ema_model.ema_model.data_shape = self.model.data_shape
 
-                with torch.no_grad():
-                    sampled = self.ema_model.sample(batch_size = self.num_samples)
+                    with torch.no_grad():
+                        sampled = self.ema_model.sample(batch_size = self.num_samples)
 
-                sampled.clamp_(0., 1.)
-                save_image(sampled, str(self.results_folder / f'results.{step}.png'), nrow = self.num_sample_rows)
+                    sampled.clamp_(0., 1.)
+                    save_image(sampled, str(self.results_folder / f'results.{step}.png'), nrow = self.num_sample_rows)
+
+                if divisible_by(step, self.checkpoint_every):
+                    self.save(f'checkpoint.{step}.pt')
 
             self.accelerator.wait_for_everyone()
 
