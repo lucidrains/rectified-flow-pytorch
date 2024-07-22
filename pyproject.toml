@@ -25,6 +25,7 @@ dependencies = [
     'accelerate',
     'einx>=0.3.0',
     'einops>=0.8.0',
+    'einx>=0.3.0',
     'ema-pytorch>=0.5.1',
     'pillow',
     'scipy',

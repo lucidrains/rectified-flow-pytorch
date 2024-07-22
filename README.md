@@ -4,6 +4,10 @@
 
 Implementation of <a href="https://www.cs.utexas.edu/~lqiang/rectflow/html/intro.html">rectified flow</a> and some of its followup research / improvements in Pytorch
 
+<img src="./images/oxford-flowers.sample.png" width="350px"></img>
+
+*32 batch size, 11k steps oxford flowers*
+
 ## Install
 
 ```bash
@@ -14,13 +18,11 @@ $ pip install rectified-flow-pytorch
 
 ```python
 import torch
-from torch import nn
+from rectified_flow_pytorch import RectifiedFlow, Unet
 
-from rectified_flow_pytorch import RectifiedFlow
+model = Unet(dim = 64)
 
-model = nn.Conv2d(3, 3, 1)
-
-rectified_flow = RectifiedFlow(model, time_cond_kwarg = None)
+rectified_flow = RectifiedFlow(model)
 
 images = torch.randn(1, 3, 256, 256)
 
@@ -35,13 +37,11 @@ For reflow as described in the paper
 
 ```python
 import torch
-from torch import nn
+from rectified_flow_pytorch import RectifiedFlow, Reflow, Unet
 
-from rectified_flow_pytorch import RectifiedFlow, Reflow
+model = Unet(dim = 64)
 
-model = nn.Conv2d(3, 3, 1)
-
-rectified_flow = RectifiedFlow(model, time_cond_kwarg = None)
+rectified_flow = RectifiedFlow(model)
 
 images = torch.randn(1, 3, 256, 256)
 
