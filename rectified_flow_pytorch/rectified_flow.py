@@ -1,10 +1,10 @@
 from __future__ import annotations
 import math
 from copy import deepcopy
-from typing import Tuple, List, Literal
+from typing import Tuple, List, Literal, Callable
 
 import torch
-from torch import nn, from_numpy
+from torch import nn, pi, from_numpy
 from torch.nn import Module, ModuleList
 import torch.nn.functional as F
 
@@ -44,6 +44,12 @@ def normalize_to_neg_one_to_one(img):
 
 def unnormalize_to_zero_to_one(t):
     return (t + 1) * 0.5
+
+# noise schedules
+
+def cosmap(t):
+    # Algorithm 21 in https://arxiv.org/abs/2403.03206
+    return 1. - (1. / (torch.tan(pi / 2 * t) + 1))
 
 # losses
 
@@ -120,6 +126,9 @@ class RectifiedFlow(Module):
             'pseudo_huber',
             'pseudo_huber_with_lpips'
         ] | Module = 'mse',
+        noise_schedule: Literal[
+            'cosmap'
+        ] | Callable = identity,
         loss_fn_kwargs: dict = dict(),
         data_shape: Tuple[int, ...] | None = None,
         immiscible = False,
@@ -132,10 +141,7 @@ class RectifiedFlow(Module):
 
         # loss fn
 
-        if isinstance(loss_fn, Module):
-            loss_fn = loss_fn
-
-        elif loss_fn == 'mse':
+        if loss_fn == 'mse':
             loss_fn = MSELoss()
 
         elif loss_fn == 'pseudo_huber':
@@ -145,10 +151,20 @@ class RectifiedFlow(Module):
         elif loss_fn == 'pseudo_huber_with_lpips':
             loss_fn = PseudoHuberLossWithLPIPS(**loss_fn_kwargs)
 
-        else:
-            raise ValueError(f'unkwown loss function {loss_fn}')
+        elif not isinstance(loss_fn, Module):
+            raise ValueError(f'unknown loss function {loss_fn}')
 
         self.loss_fn = loss_fn
+
+        # noise schedules
+
+        if noise_schedule == 'cosmap':
+            noise_schedule = cosmap
+
+        elif not callable(noise_schedule):
+            raise ValueError(f'unknown noise schedule {noise_schedule}')
+
+        self.noise_schedule = noise_schedule
 
         # sampling
 
@@ -238,11 +254,15 @@ class RectifiedFlow(Module):
         times = torch.rand(batch, device = self.device)
         padded_times = append_dims(times, data.ndim - 1)
 
+        # maybe noise schedule
+
+        t = self.noise_schedule(padded_times)
+
         # Algorithm 2 in paper
         # linear interpolation of noise with data using random times
         # x1 * t + x0 * (1 - t) - so from noise (time = 0) to data (time = 1.)
 
-        noised = padded_times * data + (1. - padded_times) * noise
+        noised = t * data + (1. - t) * noise
 
         # prepare maybe time conditioning for model
         
