@@ -37,6 +37,9 @@ def append_dims(t, ndims):
     shape = t.shape
     return t.reshape(*shape, *((1,) * ndims))
 
+def l2norm(t):
+    return F.normalize(t, p = 2, dim = -1)
+
 # normalizing helpers
 
 def normalize_to_neg_one_to_one(img):
@@ -251,7 +254,7 @@ class RectifiedFlow(Module):
 
         # times, and times with dimension padding on right
 
-        times = torch.rand(batch, device = self.device)
+        times = torch.rand((2 * batch), device = self.device)
         padded_times = append_dims(times, data.ndim - 1)
 
         # maybe noise schedule
@@ -261,6 +264,9 @@ class RectifiedFlow(Module):
         # Algorithm 2 in paper
         # linear interpolation of noise with data using random times
         # x1 * t + x0 * (1 - t) - so from noise (time = 0) to data (time = 1.)
+
+        data = repeat(data, 'b ... -> (2 b) ...')
+        noise = repeat(noise, 'b ... -> (2 b) ...')
 
         noised = t * data + (1. - t) * noise
 
@@ -280,7 +286,12 @@ class RectifiedFlow(Module):
 
         loss = self.loss_fn(pred_flow, flow, times = times, data = data)
 
-        return loss
+        # naive straightness loss
+
+        sampled_unit_vector1, sampled_unit_vector2 = rearrange(l2norm(pred_flow), '(r b) ... -> r b ...', r = 2)
+        naive_straightness_loss = F.mse_loss(sampled_unit_vector1, sampled_unit_vector2)
+
+        return loss + naive_straightness_loss * 0.1
 
 # reflow wrapper
 
