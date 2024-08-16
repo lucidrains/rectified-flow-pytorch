@@ -245,7 +245,7 @@ class RectifiedFlow(Module):
         # maybe immiscible flow
 
         if self.immiscible:
-            cost = torch.cdist(data.flatten(1), noise.flatten(1))
+            cost = torch.cdist(data.flatten(1).half(), noise.flatten(1).half())
             _, reorder_indices = linear_sum_assignment(cost.cpu())
             noise = noise[from_numpy(reorder_indices).to(cost.device)]
 
