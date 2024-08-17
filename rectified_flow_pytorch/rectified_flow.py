@@ -130,8 +130,14 @@ class RectifiedFlow(Module):
             'cosmap'
         ] | Callable = identity,
         loss_fn_kwargs: dict = dict(),
+        ema_update_after_step: int = 100,
+        ema_kwargs: dict = dict(),
         data_shape: Tuple[int, ...] | None = None,
         immiscible = False,
+        use_consistency = False,
+        consistency_decay = 0.999,
+        consistency_velocity_match_alpha = 1e-5,
+        consistency_delta_time = 1e-3,
         data_normalize_fn = normalize_to_neg_one_to_one,
         data_unnormalize_fn = unnormalize_to_zero_to_one
     ):
@@ -170,6 +176,21 @@ class RectifiedFlow(Module):
 
         self.odeint_kwargs = odeint_kwargs
         self.data_shape = data_shape
+
+        # consistency flow matching
+
+        self.use_consistency = use_consistency
+        self.consistency_decay = consistency_decay
+        self.consistency_velocity_match_alpha = consistency_velocity_match_alpha
+        self.consistency_delta_time = consistency_delta_time
+
+        if use_consistency:
+            self.ema_model = EMA(
+                model,
+                beta = consistency_decay,
+                update_after_step = ema_update_after_step,
+                **ema_kwargs
+            )
 
         # immiscible diffusion paper, will be removed if does not work
 
@@ -258,27 +279,59 @@ class RectifiedFlow(Module):
 
         t = self.noise_schedule(padded_times)
 
-        # Algorithm 2 in paper
-        # linear interpolation of noise with data using random times
-        # x1 * t + x0 * (1 - t) - so from noise (time = 0) to data (time = 1.)
+        # time needs to be from [0, 1 - delta_time] if using consistency loss
 
-        noised = t * data + (1. - t) * noise
+        if self.use_consistency:
+            t *= 1. - self.consistency_delta_time
 
-        # prepare maybe time conditioning for model
-        
-        time_kwarg = self.time_cond_kwarg
+        def get_noised_and_flows(model, t):
+            # Algorithm 2 in paper
+            # linear interpolation of noise with data using random times
+            # x1 * t + x0 * (1 - t) - so from noise (time = 0) to data (time = 1.)
 
-        if exists(time_kwarg):
-            model_kwargs.update(**{time_kwarg: times})
+            noised = t * data + (1. - t) * noise
 
-        # the model predicts the flow from the noised data
+            # prepare maybe time conditioning for model
+            
+            time_kwarg = self.time_cond_kwarg
 
-        flow = data - noise
-        pred_flow = self.model(noised, **model_kwargs)
+            if exists(time_kwarg):
+                model_kwargs.update(**{time_kwarg: times})
+
+            # the model predicts the flow from the noised data
+
+            flow = data - noise
+            pred_flow = model(noised, **model_kwargs)
+
+            return noised, flow, pred_flow
+
+        # getting flow and pred flow for main model
+
+        noised, flow, pred_flow = get_noised_and_flows(self.model, t)
+
+        # if using consistency loss, also need the ema model predicted flow
+
+        if self.use_consistency:
+            delta_t = self.consistency_delta_time
+            ema_noised, ema_flow, ema_pred_flow = get_noised_and_flows(self.ema_model, t + delta_t)
 
         # loss
 
         loss = self.loss_fn(pred_flow, flow, times = times, data = data)
+
+        # add velocity consistency loss from consistency fm paper - eq (6) in https://arxiv.org/html/2407.02398v1
+
+        if self.use_consistency:
+            α = self.consistency_velocity_match_alpha
+            pred_data = noised * (1. - t) * pred_flow
+            ema_pred_data = ema_noised * (1. - (t + delta_t)) * ema_pred_flow
+
+            consistency_loss = (
+                F.mse_loss(pred_data, ema_pred_data) +
+                α * F.mse_loss(pred_flow, ema_pred_flow)
+            )
+
+            loss = loss + consistency_loss
 
         return loss
 
@@ -831,6 +884,9 @@ class Trainer(Module):
 
             self.optimizer.step()
             self.optimizer.zero_grad()
+
+            if self.model.use_consistency:
+                self.model.ema_model.update()
 
             if self.is_main:
                 self.ema_model.update()
