@@ -96,10 +96,10 @@ class PseudoHuberLossWithLPIPS(Module):
         self.pseudo_huber = PseudoHuberLoss(data_dim)
         self.lpips = LPIPSLoss(**lpips_kwargs)
 
-    def forward(self, pred_flow, target_flow, *, times, data):
+    def forward(self, pred_flow, target_flow, *, noised, times, data):
         huber_loss = self.pseudo_huber(pred_flow, target_flow, reduction = 'none')
 
-        pred_data = pred_flow * times
+        pred_data = noised + pred_flow * (1. - times)
         lpips_loss = self.lpips(data, pred_data, reduction = 'none')
 
         time_weighted_loss = huber_loss * (1 - times) + lpips_loss * (1. / times.clamp(min = 1e-2))
@@ -267,7 +267,7 @@ class RectifiedFlow(Module):
         # maybe immiscible flow
 
         if self.immiscible:
-            cost = torch.cdist(data.flatten(1).half(), noise.flatten(1).half())
+            cost = torch.cdist(data.flatten(1), noise.flatten(1))
             _, reorder_indices = linear_sum_assignment(cost.cpu())
             noise = noise[from_numpy(reorder_indices).to(cost.device)]
 
@@ -320,7 +320,7 @@ class RectifiedFlow(Module):
 
         # losses
 
-        loss = self.loss_fn(pred_flow, flow, times = times, data = data)
+        loss = self.loss_fn(pred_flow, flow, noised = noised, times = times, data = data)
 
         if self.use_consistency:
             # add velocity consistency loss from consistency fm paper - eq (6) in https://arxiv.org/html/2407.02398v1
