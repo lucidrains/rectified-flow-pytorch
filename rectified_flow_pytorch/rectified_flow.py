@@ -135,7 +135,7 @@ class RectifiedFlow(Module):
         data_shape: Tuple[int, ...] | None = None,
         immiscible = False,
         use_consistency = False,
-        consistency_decay = 0.999,
+        consistency_decay = 0.9999,
         consistency_velocity_match_alpha = 1e-5,
         consistency_delta_time = 1e-3,
         data_normalize_fn = normalize_to_neg_one_to_one,
@@ -189,6 +189,7 @@ class RectifiedFlow(Module):
                 model,
                 beta = consistency_decay,
                 update_after_step = ema_update_after_step,
+                include_online_model = False,
                 **ema_kwargs
             )
 
@@ -275,16 +276,17 @@ class RectifiedFlow(Module):
         times = torch.rand(batch, device = self.device)
         padded_times = append_dims(times, data.ndim - 1)
 
-        # maybe noise schedule
-
-        t = self.noise_schedule(padded_times)
-
         # time needs to be from [0, 1 - delta_time] if using consistency loss
 
         if self.use_consistency:
-            t *= 1. - self.consistency_delta_time
+            padded_times *= 1. - self.consistency_delta_time
 
         def get_noised_and_flows(model, t):
+
+            # maybe noise schedule
+
+            t = self.noise_schedule(t)
+
             # Algorithm 2 in paper
             # linear interpolation of noise with data using random times
             # x1 * t + x0 * (1 - t) - so from noise (time = 0) to data (time = 1.)
@@ -296,7 +298,8 @@ class RectifiedFlow(Module):
             time_kwarg = self.time_cond_kwarg
 
             if exists(time_kwarg):
-                model_kwargs.update(**{time_kwarg: times})
+                t = rearrange(t, '... -> (...)')
+                model_kwargs.update(**{time_kwarg: t})
 
             # the model predicts the flow from the noised data
 
@@ -307,13 +310,13 @@ class RectifiedFlow(Module):
 
         # getting flow and pred flow for main model
 
-        noised, flow, pred_flow = get_noised_and_flows(self.model, t)
+        noised, flow, pred_flow = get_noised_and_flows(self.model, padded_times)
 
         # if using consistency loss, also need the ema model predicted flow
 
         if self.use_consistency:
             delta_t = self.consistency_delta_time
-            ema_noised, ema_flow, ema_pred_flow = get_noised_and_flows(self.ema_model, t + delta_t)
+            ema_noised, ema_flow, ema_pred_flow = get_noised_and_flows(self.ema_model, padded_times + delta_t)
 
         # losses
 
@@ -323,8 +326,8 @@ class RectifiedFlow(Module):
             # add velocity consistency loss from consistency fm paper - eq (6) in https://arxiv.org/html/2407.02398v1
 
             α = self.consistency_velocity_match_alpha
-            pred_data = noised + (1. - t) * pred_flow
-            ema_pred_data = ema_noised + (1. - (t + delta_t)) * ema_pred_flow
+            pred_data = noised + (1. - padded_times) * pred_flow
+            ema_pred_data = ema_noised + (1. - (padded_times + delta_t)) * ema_pred_flow
 
             consistency_loss = (
                 F.mse_loss(pred_data, ema_pred_data) +
