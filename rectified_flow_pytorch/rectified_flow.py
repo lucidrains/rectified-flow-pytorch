@@ -135,7 +135,7 @@ class RectifiedFlow(Module):
         data_shape: Tuple[int, ...] | None = None,
         immiscible = False,
         use_consistency = False,
-        consistency_decay = 0.999,
+        consistency_decay = 0.9999,
         consistency_velocity_match_alpha = 1e-5,
         consistency_delta_time = 1e-3,
         data_normalize_fn = normalize_to_neg_one_to_one,
@@ -315,16 +315,16 @@ class RectifiedFlow(Module):
             delta_t = self.consistency_delta_time
             ema_noised, ema_flow, ema_pred_flow = get_noised_and_flows(self.ema_model, t + delta_t)
 
-        # loss
+        # losses
 
         loss = self.loss_fn(pred_flow, flow, times = times, data = data)
 
-        # add velocity consistency loss from consistency fm paper - eq (6) in https://arxiv.org/html/2407.02398v1
-
         if self.use_consistency:
+            # add velocity consistency loss from consistency fm paper - eq (6) in https://arxiv.org/html/2407.02398v1
+
             α = self.consistency_velocity_match_alpha
-            pred_data = noised * (1. - t) * pred_flow
-            ema_pred_data = ema_noised * (1. - (t + delta_t)) * ema_pred_flow
+            pred_data = noised + (1. - t) * pred_flow
+            ema_pred_data = ema_noised + (1. - (t + delta_t)) * ema_pred_flow
 
             consistency_loss = (
                 F.mse_loss(pred_data, ema_pred_data) +
