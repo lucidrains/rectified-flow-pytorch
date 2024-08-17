@@ -135,7 +135,7 @@ class RectifiedFlow(Module):
         data_shape: Tuple[int, ...] | None = None,
         immiscible = False,
         use_consistency = False,
-        consistency_decay = 0.9999,
+        consistency_decay = 0.999,
         consistency_velocity_match_alpha = 1e-5,
         consistency_delta_time = 1e-3,
         data_normalize_fn = normalize_to_neg_one_to_one,
