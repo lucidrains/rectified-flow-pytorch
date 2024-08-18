@@ -219,8 +219,14 @@ class RectifiedFlow(Module):
         steps = 16,
         noise = None,
         data_shape: Tuple[int, ...] | None = None,
+        use_ema: bool = False,
         **model_kwargs
     ):
+        use_ema = default(use_ema, self.use_consistency)
+        assert not (use_ema and not self.use_consistency), 'in order to sample from an ema model, you must have `use_consistency` turned on'
+
+        model = self.ema_model if use_ema else self.model
+
         was_training = self.training
         self.eval()
 
@@ -234,7 +240,7 @@ class RectifiedFlow(Module):
                 t = repeat(t, '-> b', b = x.shape[0])
                 model_kwargs.update(**{time_kwarg: t})
 
-            return self.model(x, **model_kwargs)
+            return model(x, **model_kwargs)
 
         # start with random gaussian noise - y0
 
@@ -825,26 +831,31 @@ class Trainer(Module):
         adam_kwargs: dict = dict(),
         accelerate_kwargs: dict = dict(),
         ema_kwargs: dict = dict(),
-        use_consistency_ema = False  # whether to just use the EMA from the velocity consistency from the consistency FM paper
+        use_ema = True
     ):
         super().__init__()
         self.accelerator = Accelerator(**accelerate_kwargs)
 
         self.model = rectified_flow
 
-        if self.is_main:
-            if use_consistency_ema:
-                assert self.model.use_consistency, 'model must be using the consistency EMA for it to be reused as the main EMA model during sampling'
+        # determine whether to keep track of EMA (if not using consistency FM)
+        # which will determine which model to use for sampling
 
-                self.ema_model = self.model.ema_model
-            else:
-                self.ema_model = EMA(
-                    self.model,
-                    forward_method_names = ('sample',),
-                    **ema_kwargs
-                )
+        use_ema &= not self.model.use_consistency
+
+        self.use_ema = use_ema
+        self.ema_model = None
+
+        if self.is_main and use_ema:
+            self.ema_model = EMA(
+                self.model,
+                forward_method_names = ('sample',),
+                **ema_kwargs
+            )
 
             self.ema_model.to(self.accelerator.device)
+
+        # optimizer, dataloader, and all that
 
         self.optimizer = Adam(rectified_flow.parameters(), lr = learning_rate, **adam_kwargs)
         self.dl = DataLoader(dataset, batch_size = batch_size, shuffle = True, drop_last = True)
@@ -852,6 +863,8 @@ class Trainer(Module):
         self.model, self.optimizer, self.dl = self.accelerator.prepare(self.model, self.optimizer, self.dl)
 
         self.num_train_steps = num_train_steps
+
+        # folders
 
         self.checkpoints_folder = Path(checkpoints_folder)
         self.results_folder = Path(results_folder)
@@ -906,17 +919,20 @@ class Trainer(Module):
             if self.model.use_consistency:
                 self.model.ema_model.update()
 
-            if self.is_main:
+            if self.is_main and self.use_ema:
+                self.ema_model.ema_model.data_shape = self.model.data_shape
+
                 self.ema_model.update()
 
             self.accelerator.wait_for_everyone()
 
             if self.is_main:
+                eval_model = default(self.ema_model, self.model)
+
                 if divisible_by(step, self.save_results_every):
-                    self.ema_model.ema_model.data_shape = self.model.data_shape
 
                     with torch.no_grad():
-                        sampled = self.ema_model.sample(batch_size = self.num_samples)
+                        sampled = eval_model.sample(batch_size = self.num_samples)
 
                     sampled.clamp_(0., 1.)
                     save_image(sampled, str(self.results_folder / f'results.{step}.png'), nrow = self.num_sample_rows)
