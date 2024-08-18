@@ -81,28 +81,32 @@ class LPIPSLoss(Module):
         return loss
 
 class PseudoHuberLoss(Module):
-    def __init__(self, data_dim: int):
+    def __init__(self, data_dim: int = 3):
         super().__init__()
         self.data_dim = data_dim
 
     def forward(self, pred, target, reduction = 'mean', **kwargs):
+        data_dim = default(self.data_dim, kwargs.pop('data_dim', None))
+
         c = .00054 * self.data_dim
         loss = (F.mse_loss(pred, target, reduction = reduction) + c * c).sqrt() - c
+
+        if reduction == 'none':
+            loss = reduce(loss, 'b ... -> b', 'mean')
+
         return loss
 
 class PseudoHuberLossWithLPIPS(Module):
-    def __init__(self, data_dim: int, lpips_kwargs: dict = dict()):
+    def __init__(self, data_dim: int = 3, lpips_kwargs: dict = dict()):
         super().__init__()
         self.pseudo_huber = PseudoHuberLoss(data_dim)
         self.lpips = LPIPSLoss(**lpips_kwargs)
 
-    def forward(self, pred_flow, target_flow, *, noised, times, data):
+    def forward(self, pred_flow, target_flow, *, pred_data, times, data):
         huber_loss = self.pseudo_huber(pred_flow, target_flow, reduction = 'none')
-
-        pred_data = noised + pred_flow * (1. - times)
         lpips_loss = self.lpips(data, pred_data, reduction = 'none')
 
-        time_weighted_loss = huber_loss * (1 - times) + lpips_loss * (1. / times.clamp(min = 1e-2))
+        time_weighted_loss = huber_loss * (1 - times) + lpips_loss * (1. / times.clamp(min = 1e-1))
         return time_weighted_loss.mean()
 
 class MSELoss(Module):
@@ -138,6 +142,7 @@ class RectifiedFlow(Module):
         consistency_decay = 0.9999,
         consistency_velocity_match_alpha = 1e-5,
         consistency_delta_time = 1e-3,
+        consistency_loss_weight = 1.,
         data_normalize_fn = normalize_to_neg_one_to_one,
         data_unnormalize_fn = unnormalize_to_zero_to_one
     ):
@@ -183,6 +188,7 @@ class RectifiedFlow(Module):
         self.consistency_decay = consistency_decay
         self.consistency_velocity_match_alpha = consistency_velocity_match_alpha
         self.consistency_delta_time = consistency_delta_time
+        self.consistency_loss_weight = consistency_loss_weight
 
         if use_consistency:
             self.ema_model = EMA(
@@ -298,43 +304,46 @@ class RectifiedFlow(Module):
             time_kwarg = self.time_cond_kwarg
 
             if exists(time_kwarg):
-                t = rearrange(t, '... -> (...)')
-                model_kwargs.update(**{time_kwarg: t})
+                flat_time = rearrange(t, '... -> (...)')
+                model_kwargs.update(**{time_kwarg: flat_time})
 
             # the model predicts the flow from the noised data
 
             flow = data - noise
+
             pred_flow = model(noised, **model_kwargs)
 
-            return noised, flow, pred_flow
+            # predicted data will be the noised xt + flow * (1. - t)
+
+            pred_data = noised + pred_flow * (1. - t)
+
+            return flow, pred_flow, pred_data
 
         # getting flow and pred flow for main model
 
-        noised, flow, pred_flow = get_noised_and_flows(self.model, padded_times)
+        flow, pred_flow, pred_data = get_noised_and_flows(self.model, padded_times)
 
         # if using consistency loss, also need the ema model predicted flow
 
         if self.use_consistency:
             delta_t = self.consistency_delta_time
-            ema_noised, ema_flow, ema_pred_flow = get_noised_and_flows(self.ema_model, padded_times + delta_t)
+            ema_flow, ema_pred_flow, ema_pred_data = get_noised_and_flows(self.ema_model, padded_times + delta_t)
 
         # losses
 
-        loss = self.loss_fn(pred_flow, flow, noised = noised, times = times, data = data)
+        loss = self.loss_fn(pred_flow, flow, pred_data = pred_data, times = times, data = data)
 
         if self.use_consistency:
             # add velocity consistency loss from consistency fm paper - eq (6) in https://arxiv.org/html/2407.02398v1
 
             α = self.consistency_velocity_match_alpha
-            pred_data = noised + (1. - padded_times) * pred_flow
-            ema_pred_data = ema_noised + (1. - (padded_times + delta_t)) * ema_pred_flow
 
             consistency_loss = (
                 F.mse_loss(pred_data, ema_pred_data) +
                 α * F.mse_loss(pred_flow, ema_pred_flow)
             )
 
-            loss = loss + consistency_loss
+            loss = loss + consistency_loss * self.consistency_loss_weight
 
         return loss
 
