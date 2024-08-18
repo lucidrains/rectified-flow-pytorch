@@ -824,7 +824,8 @@ class Trainer(Module):
         num_samples: int = 16,
         adam_kwargs: dict = dict(),
         accelerate_kwargs: dict = dict(),
-        ema_kwargs: dict = dict()
+        ema_kwargs: dict = dict(),
+        use_consistency_ema = False  # whether to just use the EMA from the velocity consistency from the consistency FM paper
     ):
         super().__init__()
         self.accelerator = Accelerator(**accelerate_kwargs)
@@ -832,11 +833,16 @@ class Trainer(Module):
         self.model = rectified_flow
 
         if self.is_main:
-            self.ema_model = EMA(
-                self.model,
-                forward_method_names = ('sample',),
-                **ema_kwargs
-            )
+            if use_consistency_ema:
+                assert self.model.use_consistency, 'model must be using the consistency EMA for it to be reused as the main EMA model during sampling'
+
+                self.ema_model = self.model.ema_model
+            else:
+                self.ema_model = EMA(
+                    self.model,
+                    forward_method_names = ('sample',),
+                    **ema_kwargs
+                )
 
             self.ema_model.to(self.accelerator.device)
 

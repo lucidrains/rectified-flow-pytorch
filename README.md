@@ -1,6 +1,6 @@
 <img src="./rf.png" width="400px"></img>
 
-## Rectified Flow - Pytorch (wip)
+## Rectified Flow - Pytorch
 
 Implementation of <a href="https://www.cs.utexas.edu/~lqiang/rectflow/html/intro.html">rectified flow</a> and some of its followup research / improvements in Pytorch
 
