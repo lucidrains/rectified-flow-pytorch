@@ -1,6 +1,8 @@
 from __future__ import annotations
+
 import math
 from copy import deepcopy
+from collections import namedtuple
 from typing import Tuple, List, Literal, Callable
 
 import torch
@@ -113,6 +115,10 @@ class PseudoHuberLossWithLPIPS(Module):
 class MSELoss(Module):
     def forward(self, pred, target, **kwargs):
         return F.mse_loss(pred, target)
+
+# loss breakdown
+
+LossBreakdown = namedtuple('LossBreakdown', ['total', 'flow', 'data_match', 'velocity_match'])
 
 # main class
 
@@ -360,7 +366,7 @@ class RectifiedFlow(Module):
 
         # loss breakdown
 
-        return loss, (main_flow_loss, data_match_loss, velocity_match_loss)
+        return total_loss, LossBreakdown(total_loss, main_flow_loss, data_match_loss, velocity_match_loss)
 
 # reflow wrapper
 
@@ -923,9 +929,9 @@ class Trainer(Module):
             self.model.train()
 
             data = next(dl)
-            loss = self.model(data)
+            loss, loss_breakdown = self.model(data, return_loss_breakdown = True)
 
-            self.log(loss, step = step)
+            self.log(loss_breakdown._asdict(), step = step)
 
             self.accelerator.print(f'[{step}] loss: {loss.item():.3f}')
             self.accelerator.backward(loss)
