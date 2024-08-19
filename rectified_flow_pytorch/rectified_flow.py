@@ -907,6 +907,12 @@ class Trainer(Module):
 
         torch.save(save_package, str(self.checkpoints_folder / path))
 
+    def log(self, *args, **kwargs):
+        return self.accelerator.log(*args, **kwargs)
+
+    def log_images(self, *args, **kwargs):
+        return self.accelerator.log(*args, **kwargs)
+
     def forward(self):
 
         dl = cycle(self.dl)
@@ -919,6 +925,8 @@ class Trainer(Module):
             data = next(dl)
             loss = self.model(data)
 
+            self.log(loss, step = step)
+
             self.accelerator.print(f'[{step}] loss: {loss.item():.3f}')
             self.accelerator.backward(loss)
 
@@ -930,7 +938,6 @@ class Trainer(Module):
 
             if self.is_main and self.use_ema:
                 self.ema_model.ema_model.data_shape = self.model.data_shape
-
                 self.ema_model.update()
 
             self.accelerator.wait_for_everyone()
@@ -943,8 +950,12 @@ class Trainer(Module):
                     with torch.no_grad():
                         sampled = eval_model.sample(batch_size = self.num_samples)
 
+                    sampled = rearrange(sampled, '(row col) c h w -> c (row h) (col w)', row = self.num_sample_rows)
                     sampled.clamp_(0., 1.)
-                    save_image(sampled, str(self.results_folder / f'results.{step}.png'), nrow = self.num_sample_rows)
+
+                    self.log_images(sampled, step = step)
+
+                    save_image(sampled, str(self.results_folder / f'results.{step}.png'))
 
                 if divisible_by(step, self.checkpoint_every):
                     self.save(f'checkpoint.{step}.pt')
@@ -1013,6 +1024,12 @@ class ReflowTrainer(Module):
     def is_main(self):
         return self.accelerator.is_main_process
 
+    def log(self, *args, **kwargs):
+        return self.accelerator.log(*args, **kwargs)
+
+    def log_images(self, *args, **kwargs):
+        return self.accelerator.log(*args, **kwargs)
+
     def save(self, path):
         if not self.is_main:
             return
@@ -1034,6 +1051,8 @@ class ReflowTrainer(Module):
 
             loss = self.model(batch_size = self.batch_size)
 
+            self.log(loss, step = step)
+
             self.accelerator.print(f'[{step}] reflow loss: {loss.item():.3f}')
             self.accelerator.backward(loss)
 
@@ -1052,8 +1071,12 @@ class ReflowTrainer(Module):
                     with torch.no_grad():
                         sampled = self.ema_model.sample(batch_size = self.num_samples)
 
+                    sampled = rearrange(sampled, '(row col) c h w -> c (row h) (col w)', row = self.num_sample_rows)
                     sampled.clamp_(0., 1.)
-                    save_image(sampled, str(self.results_folder / f'results.{step}.png'), nrow = self.num_sample_rows)
+
+                    self.log_images(sampled, step = step)
+
+                    save_image(sampled, str(self.results_folder / f'results.{step}.png'))
 
                 if divisible_by(step, self.checkpoint_every):
                     self.save(f'checkpoint.{step}.pt')
