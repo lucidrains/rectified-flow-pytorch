@@ -986,6 +986,8 @@ class ReflowTrainer(Module):
         super().__init__()
         self.accelerator = Accelerator(**accelerate_kwargs)
 
+        assert not rectified_flow.use_consistency, 'reflow is not needed if using consistency flow matching'
+
         self.model = Reflow(rectified_flow)
 
         if self.is_main:
