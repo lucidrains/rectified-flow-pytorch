@@ -154,7 +154,9 @@ class RectifiedFlow(Module):
         data_normalize_fn = normalize_to_neg_one_to_one,
         data_unnormalize_fn = unnormalize_to_zero_to_one,
         clip_during_sampling = False,
-        clip_values: Tuple[float, float] = (-1.5, 1.5)
+        clip_values: Tuple[float, float] = (-1., 1.),
+        clip_flow_during_sampling = False, # this seems to help a lot when training with predict epsilon, at least for me
+        clip_flow_values: Tuple[float, float] = (-3., 3)
     ):
         super().__init__()
 
@@ -204,8 +206,13 @@ class RectifiedFlow(Module):
         self.odeint_kwargs = odeint_kwargs
         self.data_shape = data_shape
 
+        # clipping for epsilon prediction
+
         self.clip_during_sampling = clip_during_sampling
+        self.clip_flow_during_sampling = clip_flow_during_sampling
+
         self.clip_values = clip_values
+        self.clip_flow_values = clip_flow_values
 
         # consistency flow matching
 
@@ -268,7 +275,7 @@ class RectifiedFlow(Module):
             noise = output
             padded_times = append_dims(times, noised.ndim - 1)
 
-            flow = (noised - noise) / padded_times.clamp(min = 1e-20)
+            flow = (noised - noise) / padded_times
 
         else:
             raise ValueError(f'unknown objective {self.predict}')
@@ -301,12 +308,17 @@ class RectifiedFlow(Module):
 
         maybe_clip = (lambda t: t.clamp_(*self.clip_values)) if self.clip_during_sampling else identity
 
+        maybe_clip_flow = (lambda t: t.clamp_(*self.clip_flow_values)) if self.clip_flow_during_sampling else identity
+
         # ode step function
 
         def ode_fn(t, x):
             x = maybe_clip(x)
 
             _, flow = self.predict_flow(model, x, times = t, **model_kwargs)
+
+            flow = maybe_clip_flow(flow)
+
             return flow
 
         # start with random gaussian noise - y0
