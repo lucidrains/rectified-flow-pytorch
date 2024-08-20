@@ -248,7 +248,7 @@ class RectifiedFlow(Module):
     def device(self):
         return next(self.model.parameters()).device
 
-    def predict_flow(self, model: Module, noised, *, times):
+    def predict_flow(self, model: Module, noised, *, times, eps = 1e-10):
         """
         returns the model output as well as the derived flow, depending on the `predict` objective
         """
@@ -279,7 +279,7 @@ class RectifiedFlow(Module):
             noise = output
             padded_times = append_dims(times, noised.ndim - 1)
 
-            flow = (noised - noise) / padded_times
+            flow = (noised - noise) / padded_times.clamp(min = eps)
 
         else:
             raise ValueError(f'unknown objective {self.predict}')
