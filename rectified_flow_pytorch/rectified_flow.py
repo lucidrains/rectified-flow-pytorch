@@ -152,7 +152,9 @@ class RectifiedFlow(Module):
         consistency_delta_time = 1e-3,
         consistency_loss_weight = 1.,
         data_normalize_fn = normalize_to_neg_one_to_one,
-        data_unnormalize_fn = unnormalize_to_zero_to_one
+        data_unnormalize_fn = unnormalize_to_zero_to_one,
+        clip_during_sampling = True,
+        clip_values: Tuple[float, float] = (-1., 1.)
     ):
         super().__init__()
 
@@ -201,6 +203,9 @@ class RectifiedFlow(Module):
 
         self.odeint_kwargs = odeint_kwargs
         self.data_shape = data_shape
+
+        self.clip_during_sampling = clip_during_sampling
+        self.clip_values = clip_values
 
         # consistency flow matching
 
@@ -291,7 +296,16 @@ class RectifiedFlow(Module):
         data_shape = default(data_shape, self.data_shape)
         assert exists(data_shape), 'you need to either pass in a `data_shape` or have trained at least with one forward'
 
+        # clipping still helps for predict noise objective
+        # much like original ddpm paper trick
+
+        maybe_clip = (lambda t: t.clamp_(*self.clip_values)) if self.clip_during_sampling else identity
+
+        # ode step function
+
         def ode_fn(t, x):
+            x = maybe_clip(x)
+
             _, flow = self.predict_flow(model, x, times = t, **model_kwargs)
             return flow
 
