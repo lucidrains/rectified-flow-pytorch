@@ -153,8 +153,8 @@ class RectifiedFlow(Module):
         consistency_loss_weight = 1.,
         data_normalize_fn = normalize_to_neg_one_to_one,
         data_unnormalize_fn = unnormalize_to_zero_to_one,
-        clip_during_sampling = True,
-        clip_values: Tuple[float, float] = (-2., 2.)
+        clip_during_sampling = False,
+        clip_values: Tuple[float, float] = (-1.5, 1.5)
     ):
         super().__init__()
 
