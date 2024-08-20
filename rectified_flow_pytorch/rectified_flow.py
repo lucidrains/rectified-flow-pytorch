@@ -125,7 +125,7 @@ LossBreakdown = namedtuple('LossBreakdown', ['total', 'flow', 'data_match', 'vel
 class RectifiedFlow(Module):
     def __init__(
         self,
-        model: Module,
+        model: dict | Module,
         time_cond_kwarg: str | None = 'times',
         odeint_kwargs: dict = dict(
             atol = 1e-5,
@@ -154,6 +154,10 @@ class RectifiedFlow(Module):
         data_unnormalize_fn = unnormalize_to_zero_to_one
     ):
         super().__init__()
+
+        if isinstance(model, dict):
+            model = Unet(**model)
+
         self.model = model
         self.time_cond_kwarg = time_cond_kwarg # whether the model is to be conditioned on the times
 
@@ -832,9 +836,9 @@ def cycle(dl):
 class Trainer(Module):
     def __init__(
         self,
-        rectified_flow: RectifiedFlow,
+        rectified_flow: dict | RectifiedFlow,
         *,
-        dataset: Dataset,
+        dataset: dict | Dataset,
         num_train_steps = 70_000,
         learning_rate = 3e-4,
         batch_size = 16,
@@ -850,6 +854,12 @@ class Trainer(Module):
     ):
         super().__init__()
         self.accelerator = Accelerator(**accelerate_kwargs)
+
+        if isinstance(dataset, dict):
+            dataset = ImageDataset(**dataset)
+
+        if isinstance(rectified_flow, dict):
+            rectified_flow = RectifiedFlow(**rectified_flow)
 
         self.model = rectified_flow
 
