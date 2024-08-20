@@ -263,7 +263,7 @@ class RectifiedFlow(Module):
             noise = output
             padded_times = append_dims(times, noised.ndim - 1)
 
-            flow = (noised - noise) / padded_times.clamp(min = 1e-2)
+            flow = (noised - noise) / padded_times.clamp(min = 1e-20)
 
         else:
             raise ValueError(f'unknown objective {self.predict}')
