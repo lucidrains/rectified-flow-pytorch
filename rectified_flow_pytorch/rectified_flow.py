@@ -155,7 +155,7 @@ class RectifiedFlow(Module):
         data_unnormalize_fn = unnormalize_to_zero_to_one,
         clip_during_sampling = False,
         clip_values: Tuple[float, float] = (-1., 1.),
-        clip_flow_during_sampling = False, # this seems to help a lot when training with predict epsilon, at least for me
+        clip_flow_during_sampling = None, # this seems to help a lot when training with predict epsilon, at least for me
         clip_flow_values: Tuple[float, float] = (-3., 3)
     ):
         super().__init__()
@@ -169,6 +169,10 @@ class RectifiedFlow(Module):
         # objective - either flow or noise (proposed by Esser / Rombach et al in SD3)
 
         self.predict = predict
+
+        # automatically default to a working setting for predict epsilon
+
+        clip_flow_during_sampling = default(clip_flow_during_sampling, predict == 'noise')
 
         # loss fn
 
