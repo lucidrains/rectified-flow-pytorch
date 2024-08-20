@@ -118,7 +118,7 @@ class MSELoss(Module):
 
 # loss breakdown
 
-LossBreakdown = namedtuple('LossBreakdown', ['total', 'flow', 'data_match', 'velocity_match'])
+LossBreakdown = namedtuple('LossBreakdown', ['total', 'main', 'data_match', 'velocity_match'])
 
 # main class
 
@@ -132,6 +132,7 @@ class RectifiedFlow(Module):
             rtol = 1e-5,
             method = 'midpoint'
         ),
+        predict: Literal['flow', 'noise'] = 'flow',
         loss_fn: Literal[
             'mse',
             'pseudo_huber',
@@ -161,16 +162,24 @@ class RectifiedFlow(Module):
         self.model = model
         self.time_cond_kwarg = time_cond_kwarg # whether the model is to be conditioned on the times
 
+        # objective - either flow or noise (proposed by Esser / Rombach et al in SD3)
+
+        self.predict = predict
+
         # loss fn
 
         if loss_fn == 'mse':
             loss_fn = MSELoss()
 
         elif loss_fn == 'pseudo_huber':
+            assert predict == 'flow'
+
             # section 4.2 of https://arxiv.org/abs/2405.20320v1
             loss_fn = PseudoHuberLoss(**loss_fn_kwargs)
 
         elif loss_fn == 'pseudo_huber_with_lpips':
+            assert predict == 'flow'
+
             loss_fn = PseudoHuberLossWithLPIPS(**loss_fn_kwargs)
 
         elif not isinstance(loss_fn, Module):
@@ -223,6 +232,44 @@ class RectifiedFlow(Module):
     def device(self):
         return next(self.model.parameters()).device
 
+    def predict_flow(self, model: Module, noised, *, times):
+        """
+        returns the model output as well as the derived flow, depending on the `predict` objective
+        """
+
+        batch = noised.shape[0]
+
+        # prepare maybe time conditioning for model
+
+        model_kwargs = dict()
+        time_kwarg = self.time_cond_kwarg
+
+        if exists(time_kwarg):
+            times = rearrange(times, '... -> (...)')
+
+            if times.numel() == 1:
+                times = repeat(times, '1 -> b', b = batch)
+
+            model_kwargs.update(**{time_kwarg: times})
+
+        output = self.model(noised, **model_kwargs)
+
+        # depending on objective, derive flow
+
+        if self.predict == 'flow':
+            flow = output
+
+        elif self.predict == 'noise':
+            noise = output
+            padded_times = append_dims(times, noised.ndim - 1)
+
+            flow = (noised - noise) / padded_times.clamp(min = 1e-2)
+
+        else:
+            raise ValueError(f'unknown objective {self.predict}')
+
+        return output, flow
+
     @torch.no_grad()
     def sample(
         self,
@@ -245,13 +292,8 @@ class RectifiedFlow(Module):
         assert exists(data_shape), 'you need to either pass in a `data_shape` or have trained at least with one forward'
 
         def ode_fn(t, x):
-            time_kwarg = self.time_cond_kwarg
-
-            if exists(time_kwarg):
-                t = repeat(t, '-> b', b = x.shape[0])
-                model_kwargs.update(**{time_kwarg: t})
-
-            return model(x, **model_kwargs)
+            _, flow = self.predict_flow(model, x, times = t, **model_kwargs)
+            return flow
 
         # start with random gaussian noise - y0
 
@@ -317,39 +359,40 @@ class RectifiedFlow(Module):
 
             noised = t * data + (1. - t) * noise
 
-            # prepare maybe time conditioning for model
-            
-            time_kwarg = self.time_cond_kwarg
-
-            if exists(time_kwarg):
-                flat_time = rearrange(t, '... -> (...)')
-                model_kwargs.update(**{time_kwarg: flat_time})
-
             # the model predicts the flow from the noised data
 
             flow = data - noise
 
-            pred_flow = model(noised, **model_kwargs)
+            model_output, pred_flow = self.predict_flow(model, noised, times = t)
 
             # predicted data will be the noised xt + flow * (1. - t)
 
             pred_data = noised + pred_flow * (1. - t)
 
-            return flow, pred_flow, pred_data
+            return model_output, flow, pred_flow, pred_data
 
         # getting flow and pred flow for main model
 
-        flow, pred_flow, pred_data = get_noised_and_flows(self.model, padded_times)
+        output, flow, pred_flow, pred_data = get_noised_and_flows(self.model, padded_times)
 
         # if using consistency loss, also need the ema model predicted flow
 
         if self.use_consistency:
             delta_t = self.consistency_delta_time
-            ema_flow, ema_pred_flow, ema_pred_data = get_noised_and_flows(self.ema_model, padded_times + delta_t)
+            ema_output, ema_flow, ema_pred_flow, ema_pred_data = get_noised_and_flows(self.ema_model, padded_times + delta_t)
+
+        # determine target, depending on objective
+
+        if self.predict == 'flow':
+            target = flow
+        elif self.predict == 'noise':
+            target = noise
+        else:
+            raise ValueError(f'unknown objective {self.predict}')
 
         # losses
 
-        main_flow_loss = self.loss_fn(pred_flow, flow, pred_data = pred_data, times = times, data = data)
+        main_loss = self.loss_fn(output, target, pred_data = pred_data, times = times, data = data)
 
         consistency_loss = data_match_loss = velocity_match_loss = 0.
 
@@ -363,14 +406,14 @@ class RectifiedFlow(Module):
 
         # total loss
 
-        total_loss = main_flow_loss + consistency_loss * self.consistency_loss_weight
+        total_loss = main_loss + consistency_loss * self.consistency_loss_weight
 
         if not return_loss_breakdown:
             return total_loss
 
         # loss breakdown
 
-        return total_loss, LossBreakdown(total_loss, main_flow_loss, data_match_loss, velocity_match_loss)
+        return total_loss, LossBreakdown(total_loss, main_loss, data_match_loss, velocity_match_loss)
 
 # reflow wrapper
 
