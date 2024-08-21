@@ -946,11 +946,36 @@ class Trainer(Module):
 
         torch.save(save_package, str(self.checkpoints_folder / path))
 
+    def load(self, path):
+        if not self.is_main:
+            return
+        
+        load_package = torch.load(path)
+        
+        self.model.load_state_dict(load_package["model"])
+        self.ema_model.load_state_dict(load_package["ema_model"])
+        self.optimizer.load_state_dict(load_package["optimizer"])
+
     def log(self, *args, **kwargs):
         return self.accelerator.log(*args, **kwargs)
 
     def log_images(self, *args, **kwargs):
         return self.accelerator.log(*args, **kwargs)
+
+    def sample(self, fname):
+        eval_model = default(self.ema_model, self.model)
+        dl = cycle(self.dl)
+        mock_data = next(dl)
+        data_shape = mock_data.shape[1:]
+
+        with torch.no_grad():
+            sampled = eval_model.sample(batch_size=self.num_samples, data_shape=data_shape)
+      
+        sampled = rearrange(sampled, '(row col) c h w -> c (row h) (col w)', row = self.num_sample_rows)
+        sampled.clamp_(0., 1.)
+
+        save_image(sampled, fname)
+        return sampled
 
     def forward(self):
 
@@ -982,19 +1007,12 @@ class Trainer(Module):
             self.accelerator.wait_for_everyone()
 
             if self.is_main:
-                eval_model = default(self.ema_model, self.model)
 
                 if divisible_by(step, self.save_results_every):
 
-                    with torch.no_grad():
-                        sampled = eval_model.sample(batch_size = self.num_samples)
-
-                    sampled = rearrange(sampled, '(row col) c h w -> c (row h) (col w)', row = self.num_sample_rows)
-                    sampled.clamp_(0., 1.)
+                    sampled = self.sample(fname=str(self.results_folder / f'results.{step}.png'))
 
                     self.log_images(sampled, step = step)
-
-                    save_image(sampled, str(self.results_folder / f'results.{step}.png'))
 
                 if divisible_by(step, self.checkpoint_every):
                     self.save(f'checkpoint.{step}.pt')
