@@ -116,6 +116,23 @@ class MSELoss(Module):
     def forward(self, pred, target, **kwargs):
         return F.mse_loss(pred, target)
 
+class MSEAndDirectionLoss(Module):
+    """
+    Figure 7 - https://arxiv.org/abs/2410.10356
+    """
+
+    def __init__(self, cosine_sim_dim: int = 1):
+        super().__init__()
+        assert cosine_sim_dim > 0, 'cannot be batch dimension'
+        self.cosine_sim_dim = cosine_sim_dim
+
+    def forward(self, pred, target, **kwargs):
+        mse_loss = F.mse_loss(pred, target)
+
+        direction_loss = (1. - F.cosine_similarity(pred, target, dim = self.cosine_sim_dim)).mean()
+
+        return mse_loss + direction_loss
+
 # loss breakdown
 
 LossBreakdown = namedtuple('LossBreakdown', ['total', 'main', 'data_match', 'velocity_match'])
@@ -135,6 +152,7 @@ class RectifiedFlow(Module):
         predict: Literal['flow', 'noise'] = 'flow',
         loss_fn: Literal[
             'mse',
+            'mse_and_direction',
             'pseudo_huber',
             'pseudo_huber_with_lpips'
         ] | Module = 'mse',
@@ -178,6 +196,9 @@ class RectifiedFlow(Module):
 
         if loss_fn == 'mse':
             loss_fn = MSELoss()
+
+        elif loss_fn == 'mse_and_direction':
+            loss_fn = MSEAndDirectionLoss(**loss_fn_kwargs)
 
         elif loss_fn == 'pseudo_huber':
             assert predict == 'flow'
