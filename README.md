@@ -4,6 +4,8 @@
 
 Implementation of <a href="https://www.cs.utexas.edu/~lqiang/rectflow/html/intro.html">rectified flow</a> and some of its followup research / improvements in Pytorch
 
+<a href="https://drscotthawley.github.io/blog/posts/FlowModels.html">Tutorial</a> from <a href="https://github.com/drscotthawley">Dr. Scott Hawley</a>
+
 <img src="./images/oxford-flowers.sample.png" width="350px"></img>
 
 *32 batch size, 11k steps oxford flowers*
