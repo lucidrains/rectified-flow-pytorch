@@ -21,6 +21,8 @@ import einx
 from einops import einsum, reduce, rearrange, repeat
 from einops.layers.torch import Rearrange
 
+from hyper_connections import get_init_and_expand_reduce_stream_functions
+
 from scipy.optimize import linear_sum_assignment
 
 # helpers
@@ -536,7 +538,6 @@ class ResnetBlock(Module):
 
         self.block1 = Block(dim, dim_out, dropout = dropout)
         self.block2 = Block(dim_out, dim_out)
-        self.res_conv = nn.Conv2d(dim, dim_out, 1) if dim != dim_out else nn.Identity()
 
     def forward(self, x, time_emb = None):
 
@@ -550,7 +551,7 @@ class ResnetBlock(Module):
 
         h = self.block2(h)
 
-        return h + self.res_conv(x)
+        return h
 
 class LinearAttention(Module):
     def __init__(
@@ -645,7 +646,7 @@ class Unet(Module):
         dim,
         init_dim = None,
         out_dim = None,
-        dim_mults: Tuple[int, ...] = (1, 2, 4, 8),
+        dim_mults: tuple[int, ...] = (1, 2, 4, 8),
         channels = 3,
         learned_variance = False,
         learned_sinusoidal_cond = False,
@@ -656,7 +657,8 @@ class Unet(Module):
         attn_dim_head = 32,
         attn_heads = 4,
         full_attn = None,    # defaults to full attention only for inner most layer
-        flash_attn = False
+        flash_attn = False,
+        num_residual_streams = 4
     ):
         super().__init__()
 
@@ -707,6 +709,13 @@ class Unet(Module):
         FullAttention = partial(Attention, flash = flash_attn)
         resnet_block = partial(ResnetBlock, time_emb_dim = time_dim, dropout = dropout)
 
+        # hyper connections
+
+        init_hyper_conn, self.expand_streams, self.reduce_streams = get_init_and_expand_reduce_stream_functions(num_residual_streams, disable = num_residual_streams == 1)
+
+        init_hyper_conn = partial(init_hyper_conn, channel_first = True)
+        res_conv = partial(nn.Conv2d, kernel_size = 1, bias = False)
+
         # layers
 
         self.downs = ModuleList([])
@@ -719,16 +728,16 @@ class Unet(Module):
             attn_klass = FullAttention if layer_full_attn else LinearAttention
 
             self.downs.append(ModuleList([
-                resnet_block(dim_in, dim_in),
-                resnet_block(dim_in, dim_in),
-                attn_klass(dim_in, dim_head = layer_attn_dim_head, heads = layer_attn_heads),
+                init_hyper_conn(dim = dim_in, branch = resnet_block(dim_in, dim_in)),
+                init_hyper_conn(dim = dim_in, branch = resnet_block(dim_in, dim_in)),
+                init_hyper_conn(dim = dim_in, branch = attn_klass(dim_in, dim_head = layer_attn_dim_head, heads = layer_attn_heads)),
                 Downsample(dim_in, dim_out) if not is_last else nn.Conv2d(dim_in, dim_out, 3, padding = 1)
             ]))
 
         mid_dim = dims[-1]
-        self.mid_block1 = resnet_block(mid_dim, mid_dim)
-        self.mid_attn = FullAttention(mid_dim, heads = attn_heads[-1], dim_head = attn_dim_head[-1])
-        self.mid_block2 = resnet_block(mid_dim, mid_dim)
+        self.mid_block1 = init_hyper_conn(dim = mid_dim, branch = resnet_block(mid_dim, mid_dim))
+        self.mid_attn = init_hyper_conn(dim = mid_dim, branch = FullAttention(mid_dim, heads = attn_heads[-1], dim_head = attn_dim_head[-1]))
+        self.mid_block2 = init_hyper_conn(dim = mid_dim, branch = resnet_block(mid_dim, mid_dim))
 
         for ind, ((dim_in, dim_out), layer_full_attn, layer_attn_heads, layer_attn_dim_head) in enumerate(zip(*map(reversed, (in_out, full_attn, attn_heads, attn_dim_head)))):
             is_last = ind == (len(in_out) - 1)
@@ -736,16 +745,16 @@ class Unet(Module):
             attn_klass = FullAttention if layer_full_attn else LinearAttention
 
             self.ups.append(ModuleList([
-                resnet_block(dim_out + dim_in, dim_out),
-                resnet_block(dim_out + dim_in, dim_out),
-                attn_klass(dim_out, dim_head = layer_attn_dim_head, heads = layer_attn_heads),
+                init_hyper_conn(dim = dim_out + dim_in, branch = resnet_block(dim_out + dim_in, dim_out), residual_transform = res_conv(dim_out + dim_in, dim_out)),
+                init_hyper_conn(dim = dim_out + dim_in, branch = resnet_block(dim_out + dim_in, dim_out), residual_transform = res_conv(dim_out + dim_in, dim_out)),
+                init_hyper_conn(dim = dim_out, branch = attn_klass(dim_out, dim_head = layer_attn_dim_head, heads = layer_attn_heads)),
                 Upsample(dim_out, dim_in) if not is_last else  nn.Conv2d(dim_out, dim_in, 3, padding = 1)
             ]))
 
         default_out_dim = channels * (1 if not learned_variance else 2)
         self.out_dim = default(out_dim, default_out_dim)
 
-        self.final_res_block = resnet_block(init_dim * 2, init_dim)
+        self.final_res_block = init_hyper_conn(dim = init_dim * 2, branch = resnet_block(init_dim * 2, init_dim), residual_transform = res_conv(init_dim * 2, init_dim))
         self.final_conv = nn.Conv2d(init_dim, self.out_dim, 1)
 
     @property
@@ -756,6 +765,9 @@ class Unet(Module):
         assert all([divisible_by(d, self.downsample_factor) for d in x.shape[-2:]]), f'your input dimensions {x.shape[-2:]} need to be divisible by {self.downsample_factor}, given the unet'
 
         x = self.init_conv(x)
+
+        x = self.expand_streams(x)
+
         r = x.clone()
 
         t = self.time_mlp(times)
@@ -767,13 +779,13 @@ class Unet(Module):
             h.append(x)
 
             x = block2(x, t)
-            x = attn(x) + x
+            x = attn(x)
             h.append(x)
 
             x = downsample(x)
 
         x = self.mid_block1(x, t)
-        x = self.mid_attn(x) + x
+        x = self.mid_attn(x)
         x = self.mid_block2(x, t)
 
         for block1, block2, attn, upsample in self.ups:
@@ -782,13 +794,16 @@ class Unet(Module):
 
             x = torch.cat((x, h.pop()), dim = 1)
             x = block2(x, t)
-            x = attn(x) + x
+            x = attn(x)
 
             x = upsample(x)
 
         x = torch.cat((x, r), dim = 1)
 
         x = self.final_res_block(x, t)
+
+        x = self.reduce_streams(x)
+
         return self.final_conv(x)
 
 # dataset classes
