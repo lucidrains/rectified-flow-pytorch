@@ -21,7 +21,7 @@ import einx
 from einops import einsum, reduce, rearrange, repeat
 from einops.layers.torch import Rearrange
 
-from hyper_connections import get_init_and_expand_reduce_stream_functions
+from hyper_connections.hyper_connections_channel_first import get_init_and_expand_reduce_stream_functions
 
 from scipy.optimize import linear_sum_assignment
 
@@ -658,7 +658,7 @@ class Unet(Module):
         attn_heads = 4,
         full_attn = None,    # defaults to full attention only for inner most layer
         flash_attn = False,
-        num_residual_streams = 4
+        num_residual_streams = 2
     ):
         super().__init__()
 
@@ -712,8 +712,6 @@ class Unet(Module):
         # hyper connections
 
         init_hyper_conn, self.expand_streams, self.reduce_streams = get_init_and_expand_reduce_stream_functions(num_residual_streams, disable = num_residual_streams == 1)
-
-        init_hyper_conn = partial(init_hyper_conn, channel_first = True)
         res_conv = partial(nn.Conv2d, kernel_size = 1, bias = False)
 
         # layers
