@@ -21,7 +21,7 @@ import einx
 from einops import einsum, reduce, rearrange, repeat
 from einops.layers.torch import Rearrange
 
-from hyper_connections.hyper_connections_channel_first import get_init_and_expand_reduce_stream_functions
+from hyper_connections.hyper_connections_channel_first import get_init_and_expand_reduce_stream_functions, Residual
 
 from scipy.optimize import linear_sum_assignment
 
@@ -726,9 +726,9 @@ class Unet(Module):
             attn_klass = FullAttention if layer_full_attn else LinearAttention
 
             self.downs.append(ModuleList([
-                init_hyper_conn(dim = dim_in, branch = resnet_block(dim_in, dim_in)),
-                init_hyper_conn(dim = dim_in, branch = resnet_block(dim_in, dim_in)),
-                init_hyper_conn(dim = dim_in, branch = attn_klass(dim_in, dim_head = layer_attn_dim_head, heads = layer_attn_heads)),
+                Residual(branch = resnet_block(dim_in, dim_in)),
+                Residual(branch = resnet_block(dim_in, dim_in)),
+                Residual(branch = attn_klass(dim_in, dim_head = layer_attn_dim_head, heads = layer_attn_heads)),
                 Downsample(dim_in, dim_out) if not is_last else nn.Conv2d(dim_in, dim_out, 3, padding = 1)
             ]))
 
@@ -743,16 +743,16 @@ class Unet(Module):
             attn_klass = FullAttention if layer_full_attn else LinearAttention
 
             self.ups.append(ModuleList([
-                init_hyper_conn(dim = dim_out + dim_in, branch = resnet_block(dim_out + dim_in, dim_out), residual_transform = res_conv(dim_out + dim_in, dim_out)),
-                init_hyper_conn(dim = dim_out + dim_in, branch = resnet_block(dim_out + dim_in, dim_out), residual_transform = res_conv(dim_out + dim_in, dim_out)),
-                init_hyper_conn(dim = dim_out, branch = attn_klass(dim_out, dim_head = layer_attn_dim_head, heads = layer_attn_heads)),
+                Residual(branch = resnet_block(dim_out + dim_in, dim_out), residual_transform = res_conv(dim_out + dim_in, dim_out)),
+                Residual(branch = resnet_block(dim_out + dim_in, dim_out), residual_transform = res_conv(dim_out + dim_in, dim_out)),
+                Residual(branch = attn_klass(dim_out, dim_head = layer_attn_dim_head, heads = layer_attn_heads)),
                 Upsample(dim_out, dim_in) if not is_last else  nn.Conv2d(dim_out, dim_in, 3, padding = 1)
             ]))
 
         default_out_dim = channels * (1 if not learned_variance else 2)
         self.out_dim = default(out_dim, default_out_dim)
 
-        self.final_res_block = init_hyper_conn(dim = init_dim * 2, branch = resnet_block(init_dim * 2, init_dim), residual_transform = res_conv(init_dim * 2, init_dim))
+        self.final_res_block = Residual(branch = resnet_block(init_dim * 2, init_dim), residual_transform = res_conv(init_dim * 2, init_dim))
         self.final_conv = nn.Conv2d(init_dim, self.out_dim, 1)
 
     @property
@@ -763,8 +763,6 @@ class Unet(Module):
         assert all([divisible_by(d, self.downsample_factor) for d in x.shape[-2:]]), f'your input dimensions {x.shape[-2:]} need to be divisible by {self.downsample_factor}, given the unet'
 
         x = self.init_conv(x)
-
-        x = self.expand_streams(x)
 
         r = x.clone()
 
@@ -782,9 +780,13 @@ class Unet(Module):
 
             x = downsample(x)
 
+        x = self.expand_streams(x)
+
         x = self.mid_block1(x, t)
         x = self.mid_attn(x)
         x = self.mid_block2(x, t)
+
+        x = self.reduce_streams(x)
 
         for block1, block2, attn, upsample in self.ups:
             x = torch.cat((x, h.pop()), dim = 1)
@@ -799,8 +801,6 @@ class Unet(Module):
         x = torch.cat((x, r), dim = 1)
 
         x = self.final_res_block(x, t)
-
-        x = self.reduce_streams(x)
 
         return self.final_conv(x)
 
