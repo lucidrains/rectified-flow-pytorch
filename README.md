@@ -6,6 +6,8 @@ Implementation of <a href="https://www.cs.utexas.edu/~lqiang/rectflow/html/intro
 
 <a href="https://drscotthawley.github.io/blog/posts/FlowModels.html">Tutorial</a> from <a href="https://github.com/drscotthawley">Dr. Scott Hawley</a>
 
+Youtube AI Educators - <a href="https://www.youtube.com/watch?v=7NNxK3CqaDk">Yannic</a> | <a href="https://www.youtube.com/watch?v=7cMzfkWFWhI">Outlier</a>
+
 <img src="./images/oxford-flowers.sample.png" width="350px"></img>
 
 *32 batch size, 11k steps oxford flowers*
