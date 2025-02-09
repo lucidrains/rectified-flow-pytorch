@@ -40,7 +40,9 @@ Homepage = "https://pypi.org/project/rectified-flow-pytorch/"
 Repository = "https://github.com/lucidrains/rectified-flow-pytorch"
 
 [project.optional-dependencies]
-examples = []
+examples = [
+    "datasets",
+]
 
 [build-system]
 requires = ["hatchling"]

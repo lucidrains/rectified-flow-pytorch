@@ -90,6 +90,20 @@ trainer = Trainer(
 trainer()
 ```
 
+## Examples
+
+Quick test on oxford flowers
+
+```bash
+$ pip install .[examples]
+```
+
+Then
+
+```bash
+$ python train_oxford.py
+```
+
 ## Citations
 
 ```bibtex
