@@ -25,6 +25,8 @@ from hyper_connections.hyper_connections_channel_first import get_init_and_expan
 
 from scipy.optimize import linear_sum_assignment
 
+from rectified_flow_pytorch.nano_flow import NanoFlow
+
 # helpers
 
 def exists(v):
@@ -872,7 +874,7 @@ def cycle(dl):
 class Trainer(Module):
     def __init__(
         self,
-        rectified_flow: dict | RectifiedFlow,
+        rectified_flow: dict | RectifiedFlow | NanoFlow,
         *,
         dataset: dict | Dataset,
         num_train_steps = 70_000,
@@ -902,7 +904,7 @@ class Trainer(Module):
         # determine whether to keep track of EMA (if not using consistency FM)
         # which will determine which model to use for sampling
 
-        use_ema &= not self.model.use_consistency
+        use_ema &= not getattr(self.model, 'use_consistency', False)
 
         self.use_ema = use_ema
         self.ema_model = None
@@ -924,6 +926,8 @@ class Trainer(Module):
         self.model, self.optimizer, self.dl = self.accelerator.prepare(self.model, self.optimizer, self.dl)
 
         self.num_train_steps = num_train_steps
+
+        self.return_loss_breakdown = isinstance(rectified_flow, RectifiedFlow)
 
         # folders
 
@@ -1000,9 +1004,12 @@ class Trainer(Module):
             self.model.train()
 
             data = next(dl)
-            loss, loss_breakdown = self.model(data, return_loss_breakdown = True)
 
-            self.log(loss_breakdown._asdict(), step = step)
+            if self.return_loss_breakdown:
+                loss, loss_breakdown = self.model(data, return_loss_breakdown = True)
+                self.log(loss_breakdown._asdict(), step = step)
+            else:
+                loss = self.model(data)
 
             self.accelerator.print(f'[{step}] loss: {loss.item():.3f}')
             self.accelerator.backward(loss)
@@ -1010,7 +1017,7 @@ class Trainer(Module):
             self.optimizer.step()
             self.optimizer.zero_grad()
 
-            if self.model.use_consistency:
+            if getattr(self.model, 'use_consistency', False):
                 self.model.ema_model.update()
 
             if self.is_main and self.use_ema:
