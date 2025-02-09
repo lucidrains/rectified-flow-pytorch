@@ -72,3 +72,17 @@ class NanoFlow(Module):
         pred_flow = self.model(noised_data, **time_kwarg, **kwargs)
 
         return F.mse_loss(flow, pred_flow)
+
+# quick test
+
+if __name__ == '__main__':
+    model = torch.nn.Conv2d(3, 3, 1)
+
+    nano_flow = NanoFlow(model)
+    data = torch.randn(16, 3, 16, 16)
+
+    loss = nano_flow(data)
+    loss.backward()
+
+    sampled = nano_flow.sample(batch_size = 16)
+    assert sampled.shape == data.shape
