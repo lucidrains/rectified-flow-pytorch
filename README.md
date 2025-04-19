@@ -171,3 +171,12 @@ $ python train_oxford.py
     url     = {https://api.semanticscholar.org/CorpusID:272987528}
 }
 ```
+
+```bibtex
+@inproceedings{Sun2025F5RTTSIF,
+    title   = {F5R-TTS: Improving Flow-Matching based Text-to-Speech with Group Relative Policy Optimization},
+    author  = {Xiaohui Sun and Ruitong Xiao and Jianye Mo and Bowen Wu and Qun Yu and Baoxun Wang},
+    year    = {2025},
+    url     = {https://api.semanticscholar.org/CorpusID:277510064}
+}
+```

@@ -3,12 +3,13 @@ from __future__ import annotations
 import math
 from copy import deepcopy
 from collections import namedtuple
-from typing import Tuple, List, Literal, Callable
+from typing import Literal, Callable
 
 import torch
 from torch import Tensor
-from torch import nn, pi, from_numpy
+from torch import nn, pi, cat, stack, from_numpy
 from torch.nn import Module, ModuleList
+from torch.distributions import Normal
 import torch.nn.functional as F
 
 from torchdiffeq import odeint
@@ -120,6 +121,11 @@ class MSELoss(Module):
     def forward(self, pred, target, **kwargs):
         return F.mse_loss(pred, target)
 
+class MeanVarianceNetLoss(Module):
+    def forward(self, pred, target, **kwargs):
+        dist = Normal(*pred.unbind(dim = 2))
+        return -dist.log_prob(target).mean()
+
 # loss breakdown
 
 LossBreakdown = namedtuple('LossBreakdown', ['total', 'main', 'data_match', 'velocity_match'])
@@ -130,6 +136,7 @@ class RectifiedFlow(Module):
     def __init__(
         self,
         model: dict | Module,
+        mean_variance_net: bool | None = None,
         time_cond_kwarg: str | None = 'times',
         odeint_kwargs: dict = dict(
             atol = 1e-5,
@@ -148,7 +155,7 @@ class RectifiedFlow(Module):
         loss_fn_kwargs: dict = dict(),
         ema_update_after_step: int = 100,
         ema_kwargs: dict = dict(),
-        data_shape: Tuple[int, ...] | None = None,
+        data_shape: tuple[int, ...] | None = None,
         immiscible = False,
         use_consistency = False,
         consistency_decay = 0.9999,
@@ -158,9 +165,9 @@ class RectifiedFlow(Module):
         data_normalize_fn = normalize_to_neg_one_to_one,
         data_unnormalize_fn = unnormalize_to_zero_to_one,
         clip_during_sampling = False,
-        clip_values: Tuple[float, float] = (-1., 1.),
+        clip_values: tuple[float, float] = (-1., 1.),
         clip_flow_during_sampling = None, # this seems to help a lot when training with predict epsilon, at least for me
-        clip_flow_values: Tuple[float, float] = (-3., 3)
+        clip_flow_values: tuple[float, float] = (-3., 3)
     ):
         super().__init__()
 
@@ -169,6 +176,16 @@ class RectifiedFlow(Module):
 
         self.model = model
         self.time_cond_kwarg = time_cond_kwarg # whether the model is to be conditioned on the times
+
+        # allow for mean variance output prediction
+
+        if not exists(mean_variance_net):
+            mean_variance_net = default(model.mean_variance_net if isinstance(model, Unet) else mean_variance_net, False)
+
+        self.mean_variance_net = mean_variance_net
+
+        if mean_variance_net:
+            loss_fn = MeanVarianceNetLoss()
 
         # objective - either flow or noise (proposed by Esser / Rombach et al in SD3)
 
@@ -296,7 +313,7 @@ class RectifiedFlow(Module):
         batch_size = 1,
         steps = 16,
         noise = None,
-        data_shape: Tuple[int, ...] | None = None,
+        data_shape: tuple[int, ...] | None = None,
         use_ema: bool = False,
         **model_kwargs
     ):
@@ -323,7 +340,13 @@ class RectifiedFlow(Module):
         def ode_fn(t, x):
             x = maybe_clip(x)
 
-            _, flow = self.predict_flow(model, x, times = t, **model_kwargs)
+            _, output = self.predict_flow(model, x, times = t, **model_kwargs)
+
+            flow = output
+
+            if self.mean_variance_net:
+                mean, variance = output.unbind(dim = 2)
+                flow = torch.normal(mean, variance)
 
             flow = maybe_clip_flow(flow)
 
@@ -397,7 +420,15 @@ class RectifiedFlow(Module):
 
             flow = data - noise
 
-            model_output, pred_flow = self.predict_flow(model, noised, times = t)
+            model_output, model_output = self.predict_flow(model, noised, times = t)
+
+            # if mean variance network, sample from normal
+
+            pred_flow = model_output
+
+            if self.mean_variance_net:
+                mean, variance = model_output.unbind(dim = 2)
+                pred_flow = torch.normal(mean, variance)
 
             # predicted data will be the noised xt + flow * (1. - t)
 
@@ -494,7 +525,7 @@ class SinusoidalPosEmb(Module):
         emb = math.log(self.theta) / (half_dim - 1)
         emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
         emb = einx.multiply('i, j -> i j', x, emb)
-        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
+        emb = cat((emb.sin(), emb.cos()), dim=-1)
         return emb
 
 class RandomOrLearnedSinusoidalPosEmb(Module):
@@ -507,8 +538,8 @@ class RandomOrLearnedSinusoidalPosEmb(Module):
     def forward(self, x):
         x = rearrange(x, 'b -> b 1')
         freqs = x * rearrange(self.weights, 'd -> 1 d') * 2 * math.pi
-        fouriered = torch.cat((freqs.sin(), freqs.cos()), dim = -1)
-        fouriered = torch.cat((x, fouriered), dim = -1)
+        fouriered = cat((freqs.sin(), freqs.cos()), dim = -1)
+        fouriered = cat((x, fouriered), dim = -1)
         return fouriered
 
 class Block(Module):
@@ -587,7 +618,7 @@ class LinearAttention(Module):
         q, k, v = tuple(rearrange(t, 'b (h c) x y -> b h c (x y)', h = self.heads) for t in qkv)
 
         mk, mv = tuple(repeat(t, 'h c n -> b h c n', b = b) for t in self.mem_kv)
-        k, v = map(partial(torch.cat, dim = -1), ((mk, k), (mv, v)))
+        k, v = map(partial(cat, dim = -1), ((mk, k), (mv, v)))
 
         q = q.softmax(dim = -2)
         k = k.softmax(dim = -1)
@@ -629,7 +660,7 @@ class Attention(Module):
         q, k, v = map(lambda t: rearrange(t, 'b (h c) x y -> b h (x y) c', h = self.heads), qkv)
 
         mk, mv = map(lambda t: repeat(t, 'h n d -> b h n d', b = b), self.mem_kv)
-        k, v = map(partial(torch.cat, dim = -2), ((mk, k), (mv, v)))
+        k, v = map(partial(cat, dim = -2), ((mk, k), (mv, v)))
 
         q = q * self.scale
         sim = einsum(q, k, 'b h i d, b h j d -> b h i j')
@@ -650,7 +681,7 @@ class Unet(Module):
         out_dim = None,
         dim_mults: tuple[int, ...] = (1, 2, 4, 8),
         channels = 3,
-        learned_variance = False,
+        mean_variance_net = False,
         learned_sinusoidal_cond = False,
         random_fourier_features = False,
         learned_sinusoidal_dim = 16,
@@ -751,7 +782,9 @@ class Unet(Module):
                 Upsample(dim_out, dim_in) if not is_last else  nn.Conv2d(dim_out, dim_in, 3, padding = 1)
             ]))
 
-        default_out_dim = channels * (1 if not learned_variance else 2)
+        self.mean_variance_net = mean_variance_net
+
+        default_out_dim = channels * (1 if not mean_variance_net else 2)
         self.out_dim = default(out_dim, default_out_dim)
 
         self.final_res_block = Residual(branch = resnet_block(init_dim * 2, init_dim), residual_transform = res_conv(init_dim * 2, init_dim))
@@ -791,20 +824,28 @@ class Unet(Module):
         x = self.reduce_streams(x)
 
         for block1, block2, attn, upsample in self.ups:
-            x = torch.cat((x, h.pop()), dim = 1)
+            x = cat((x, h.pop()), dim = 1)
             x = block1(x, t)
 
-            x = torch.cat((x, h.pop()), dim = 1)
+            x = cat((x, h.pop()), dim = 1)
             x = block2(x, t)
             x = attn(x)
 
             x = upsample(x)
 
-        x = torch.cat((x, r), dim = 1)
+        x = cat((x, r), dim = 1)
 
         x = self.final_res_block(x, t)
 
-        return self.final_conv(x)
+        out = self.final_conv(x)
+
+        if not self.mean_variance_net:
+            return out
+
+        out = rearrange(out, 'b (c mu_sigma) h w -> b c mu_sigma h w', mu_sigma = 2)
+        mean, variance = out.unbind(dim = 2)
+        variance = variance.exp() # variance needs to be positive
+        return stack((mean, variance), dim = 2)
 
 # dataset classes
 
@@ -820,7 +861,7 @@ class ImageDataset(Dataset):
         self,
         folder: str | Path,
         image_size: int,
-        exts: List[str] = ['jpg', 'jpeg', 'png', 'tiff'],
+        exts: list[str] = ['jpg', 'jpeg', 'png', 'tiff'],
         augment_horizontal_flip = False,
         convert_image_to = None
     ):

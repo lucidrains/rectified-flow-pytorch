@@ -1,6 +1,6 @@
 [project]
 name = "rectified-flow-pytorch"
-version = "0.2.4"
+version = "0.2.5"
 description = "Rectified Flow in Pytorch"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
@@ -28,7 +28,7 @@ dependencies = [
     'einx>=0.3.0',
     'ema-pytorch>=0.5.2',
     'hyper-connections>=0.1.8',
-    'pillow',
+    'pillow>=9.4.0',
     'scipy',
     'torch>=2.0',
     'torchvision',
