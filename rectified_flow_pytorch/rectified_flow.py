@@ -314,6 +314,7 @@ class RectifiedFlow(Module):
         steps = 16,
         noise = None,
         data_shape: tuple[int, ...] | None = None,
+        temperature: float = 1.,
         use_ema: bool = False,
         **model_kwargs
     ):
@@ -346,6 +347,9 @@ class RectifiedFlow(Module):
 
             if self.mean_variance_net:
                 mean, variance = output.unbind(dim = 2)
+
+                variance = variance * temperature
+
                 flow = torch.normal(mean, variance)
 
             flow = maybe_clip_flow(flow)
@@ -925,6 +929,7 @@ class Trainer(Module):
         results_folder: str = './results',
         save_results_every: int = 100,
         checkpoint_every: int = 1000,
+        sample_temperature: float = 1.,
         num_samples: int = 16,
         adam_kwargs: dict = dict(),
         accelerate_kwargs: dict = dict(),
@@ -980,6 +985,7 @@ class Trainer(Module):
 
         self.checkpoint_every = checkpoint_every
         self.save_results_every = save_results_every
+        self.sample_temperature = sample_temperature
 
         self.num_sample_rows = int(math.sqrt(num_samples))
         assert (self.num_sample_rows ** 2) == num_samples, f'{num_samples} must be a square'
@@ -1027,7 +1033,11 @@ class Trainer(Module):
         data_shape = mock_data.shape[1:]
 
         with torch.no_grad():
-            sampled = eval_model.sample(batch_size=self.num_samples, data_shape=data_shape)
+            sampled = eval_model.sample(
+                batch_size = self.num_samples,
+                data_shape = data_shape,
+                temperature = self.sample_temperature
+            )
       
         sampled = rearrange(sampled, '(row col) c h w -> c (row h) (col w)', row = self.num_sample_rows)
         sampled.clamp_(0., 1.)

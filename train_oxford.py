@@ -27,7 +27,7 @@ class OxfordFlowersDataset(Dataset):
         return tensor / 255.
 
 flowers_dataset = OxfordFlowersDataset(
-    image_size = 128
+    image_size = 64
 )
 
 # models and trainer
@@ -36,7 +36,7 @@ from rectified_flow_pytorch import RectifiedFlow, Unet, Trainer
 
 model = Unet(
     dim = 64,
-    mean_variance_net = False
+    mean_variance_net = True
 )
 
 rectified_flow = RectifiedFlow(model)
@@ -45,6 +45,7 @@ trainer = Trainer(
     rectified_flow,
     dataset = flowers_dataset,
     num_train_steps = 70_000,
+    sample_temperature = 1.5,
     results_folder = './results'   # samples will be saved periodically to this folder
 )
 
