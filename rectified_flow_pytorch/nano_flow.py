@@ -47,7 +47,7 @@ class NanoFlow(Module):
             time = time.expand(batch_size)
             time_kwarg = {self.times_cond_kwarg: time} if exists(self.times_cond_kwarg) else dict()
 
-            pred_flow = self.model(noise, **time_kwarg, **kwargs)
+            pred_flow = self.model(denoised, **time_kwarg, **kwargs)
             denoised = denoised + delta * pred_flow
 
         return denoised
