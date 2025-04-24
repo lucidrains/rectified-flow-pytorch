@@ -36,7 +36,12 @@ from rectified_flow_pytorch import NanoFlow, Unet, Trainer
 
 model = Unet(dim = 64)
 
-rectified_flow = NanoFlow(model, times_cond_kwarg = 'times')
+rectified_flow = NanoFlow(
+    model,
+    times_cond_kwarg = 'times',
+    normalize_data_fn = lambda t: t * 2. - 1.,
+    unnormalize_data_fn = lambda t: (t + 1.) / 2.
+)
 
 trainer = Trainer(
     rectified_flow,

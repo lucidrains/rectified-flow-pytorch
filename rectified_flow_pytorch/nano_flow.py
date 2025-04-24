@@ -8,6 +8,9 @@ def exists(v):
 def default(v, d):
     return v if exists(v) else d
 
+def identity(t):
+    return t
+
 def append_dims(t, dims):
     shape = t.shape
     ones = ((1,) * dims)
@@ -18,12 +21,17 @@ class NanoFlow(Module):
         self,
         model: Module,
         times_cond_kwarg = None,
-        data_shape = None
+        data_shape = None,
+        normalize_data_fn = identity,
+        unnormalize_data_fn = identity,
     ):
         super().__init__()
         self.model = model
         self.times_cond_kwarg = times_cond_kwarg
         self.data_shape = None
+
+        self.normalize_data_fn = normalize_data_fn
+        self.unnormalize_data_fn = unnormalize_data_fn
 
     @torch.no_grad()
     def sample(
@@ -50,9 +58,11 @@ class NanoFlow(Module):
             pred_flow = self.model(denoised, **time_kwarg, **kwargs)
             denoised = denoised + delta * pred_flow
 
-        return denoised
+        return self.unnormalize_data_fn(denoised)
 
     def forward(self, data, **kwargs):
+        data = self.normalize_data_fn(data)
+
         # shapes and variables
 
         shape, ndim = data.shape, data.ndim
