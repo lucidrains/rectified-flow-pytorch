@@ -123,7 +123,7 @@ class MSELoss(Module):
 
 class MeanVarianceNetLoss(Module):
     def forward(self, pred, target, **kwargs):
-        dist = Normal(*pred.unbind(dim = 2))
+        dist = Normal(*pred)
         return -dist.log_prob(target).mean()
 
 # loss breakdown
@@ -346,7 +346,7 @@ class RectifiedFlow(Module):
             flow = output
 
             if self.mean_variance_net:
-                mean, variance = output.unbind(dim = 2)
+                mean, variance = output
 
                 variance = variance * temperature
 
@@ -431,7 +431,7 @@ class RectifiedFlow(Module):
             pred_flow = model_output
 
             if self.mean_variance_net:
-                mean, variance = model_output.unbind(dim = 2)
+                mean, variance = model_output
                 pred_flow = torch.normal(mean, variance)
 
             # predicted data will be the noised xt + flow * (1. - t)
@@ -846,10 +846,9 @@ class Unet(Module):
         if not self.mean_variance_net:
             return out
 
-        out = rearrange(out, 'b (c mu_sigma) h w -> b c mu_sigma h w', mu_sigma = 2)
-        mean, variance = out.unbind(dim = 2)
-        variance = variance.exp() # variance needs to be positive
-        return stack((mean, variance), dim = 2)
+        mean, log_var = rearrange(out, 'b (c mean_log_var) h w -> mean_log_var b c h w', mean_log_var = 2)
+        variance = log_var.exp() # variance needs to be positive
+        return stack((mean, variance))
 
 # dataset classes
 
@@ -1034,7 +1033,7 @@ class Trainer(Module):
 
         additional_sample_kwargs = dict()
         if isinstance(eval_model.model, RectifiedFlow):
-            additional_sample_kwargs.update(temperature = self.temperature)
+            additional_sample_kwargs.update(temperature = self.sample_temperature)
 
         with torch.no_grad():
             sampled = eval_model.sample(
