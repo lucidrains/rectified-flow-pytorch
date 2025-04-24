@@ -27,7 +27,7 @@ class OxfordFlowersDataset(Dataset):
         return tensor / 255.
 
 flowers_dataset = OxfordFlowersDataset(
-    image_size = 128
+    image_size = 64
 )
 
 # models and trainer

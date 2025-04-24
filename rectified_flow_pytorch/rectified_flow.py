@@ -1032,11 +1032,15 @@ class Trainer(Module):
         mock_data = next(dl)
         data_shape = mock_data.shape[1:]
 
+        additional_sample_kwargs = dict()
+        if isinstance(eval_model.model, RectifiedFlow):
+            additional_sample_kwargs.update(temperature = self.temperature)
+
         with torch.no_grad():
             sampled = eval_model.sample(
                 batch_size = self.num_samples,
                 data_shape = data_shape,
-                temperature = self.sample_temperature
+                **additional_sample_kwargs
             )
       
         sampled = rearrange(sampled, '(row col) c h w -> c (row h) (col w)', row = self.num_sample_rows)
@@ -1081,7 +1085,7 @@ class Trainer(Module):
 
                 if divisible_by(step, self.save_results_every):
 
-                    sampled = self.sample(fname=str(self.results_folder / f'results.{step}.png'))
+                    sampled = self.sample(fname = str(self.results_folder / f'results.{step}.png'))
 
                     self.log_images(sampled, step = step)
 
