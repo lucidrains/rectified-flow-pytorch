@@ -348,9 +348,9 @@ class RectifiedFlow(Module):
             if self.mean_variance_net:
                 mean, variance = output
 
-                variance = variance * temperature
+                std = variance.clamp(min = 1e-5).sqrt()
 
-                flow = torch.normal(mean, variance)
+                flow = torch.normal(mean, std * temperature)
 
             flow = maybe_clip_flow(flow)
 
