@@ -41,12 +41,15 @@ class NanoFlow(Module):
         data_shape = None,
         **kwargs
     ):
+        assert steps >= 1
+
         data_shape = default(data_shape, self.data_shape)
         assert exists(data_shape), 'shape of the data must be passed in, or set at init or during training'
         device = next(self.model.parameters()).device
 
         noise = torch.randn((batch_size, *self.data_shape), device = device)
-        times = torch.linspace(0., 1., steps, device = device)
+
+        times = torch.linspace(0., 1., steps + 1, device = device)[:-1]
         delta = 1. / steps
 
         denoised = noise
