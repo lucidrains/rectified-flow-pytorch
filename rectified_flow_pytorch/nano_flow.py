@@ -81,7 +81,7 @@ class NanoFlow(Module):
         padded_times = append_dims(times, ndim - 1)
         noised_data = noise.lerp(data, padded_times) # noise the data with random amounts of noise (time) - lerp is read as noise -> data from 0. to 1.
 
-        time_kwarg = {self.times_cond_kwarg: times} if exists(self.times_cond_kwarg) else dict() # maybe time conditioning, could work without it
+        time_kwarg = {self.times_cond_kwarg: times} if exists(self.times_cond_kwarg) else dict() # maybe time conditioning, could work without it (https://arxiv.org/abs/2502.13129v1)
         pred_flow = self.model(noised_data, **time_kwarg, **kwargs)
 
         return F.mse_loss(flow, pred_flow)

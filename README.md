@@ -189,3 +189,14 @@ $ python train_oxford.py
     url     = {https://api.semanticscholar.org/CorpusID:278769814}
 }
 ```
+
+```bibtex
+@article{Sun2025IsNC,
+    title   = {Is Noise Conditioning Necessary for Denoising Generative Models?},
+    author  = {Qiao Sun and Zhicheng Jiang and Hanhong Zhao and Kaiming He},
+    journal = {ArXiv},
+    year    = {2025},
+    volume  = {abs/2502.13129},
+    url     = {https://api.semanticscholar.org/CorpusID:276421559}
+}
+```
