@@ -50,6 +50,7 @@ trainer = Trainer(
     mean_flow,
     dataset = flowers_dataset,
     num_train_steps = 70_000,
+    learning_rate = 1e-4,
     results_folder = './results'   # samples will be saved periodically to this folder
 )
 

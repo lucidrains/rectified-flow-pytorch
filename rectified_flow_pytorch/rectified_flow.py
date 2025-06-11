@@ -960,7 +960,8 @@ class Trainer(Module):
         adam_kwargs: dict = dict(),
         accelerate_kwargs: dict = dict(),
         ema_kwargs: dict = dict(),
-        use_ema = True
+        use_ema = True,
+        max_grad_norm = 0.5
     ):
         super().__init__()
         self.accelerator = Accelerator(**accelerate_kwargs)
@@ -1019,6 +1020,8 @@ class Trainer(Module):
 
         assert self.checkpoints_folder.is_dir()
         assert self.results_folder.is_dir()
+
+        self.max_grad_norm = max_grad_norm
 
     @property
     def is_main(self):
@@ -1094,6 +1097,8 @@ class Trainer(Module):
 
             self.accelerator.print(f'[{step}] loss: {loss.item():.3f}')
             self.accelerator.backward(loss)
+
+            self.accelerator.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
 
             self.optimizer.step()
             self.optimizer.zero_grad()
