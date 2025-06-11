@@ -40,7 +40,7 @@ class MeanFlow(Module):
         self,
         batch_size = 1,
         data_shape = None,
-        requires_grad = True
+        requires_grad = False
     ):
         context = nullcontext if not requires_grad else torch.no_grad
 
