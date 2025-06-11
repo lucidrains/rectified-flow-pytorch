@@ -695,7 +695,9 @@ class Unet(Module):
         attn_heads = 4,
         full_attn = None,    # defaults to full attention only for inner most layer
         flash_attn = False,
-        num_residual_streams = 2
+        num_residual_streams = 2,
+        accept_cond = False,
+        dim_cond = None
     ):
         super().__init__()
 
@@ -728,6 +730,20 @@ class Unet(Module):
             nn.GELU(),
             nn.Linear(time_dim, time_dim)
         )
+
+        # additional cond mlp
+
+        self.cond_mlp = None
+        if accept_cond:
+            assert exists(dim_cond), f'`dim_cond` must be set on init'
+            first_dim = dim if dim_cond == 1 else dim_cond
+
+            self.cond_mlp = nn.Sequential(
+                SinusoidalPosEmb(dim, theta = sinusoidal_pos_emb_theta) if dim_cond == 1 else nn.Identity(),
+                nn.Linear(first_dim, time_dim),
+                nn.GELU(),
+                nn.Linear(time_dim, time_dim)
+            )
 
         # attention
 
@@ -798,7 +814,7 @@ class Unet(Module):
     def downsample_factor(self):
         return 2 ** (len(self.downs) - 1)
 
-    def forward(self, x, times):
+    def forward(self, x, times, cond = None):
         assert all([divisible_by(d, self.downsample_factor) for d in x.shape[-2:]]), f'your input dimensions {x.shape[-2:]} need to be divisible by {self.downsample_factor}, given the unet'
 
         x = self.init_conv(x)
@@ -806,6 +822,17 @@ class Unet(Module):
         r = x.clone()
 
         t = self.time_mlp(times)
+
+        # maybe additional cond
+
+        assert not (exists(cond) ^ exists(self.cond_mlp))
+
+        if exists(cond):
+            assert exists(self.cond_mlp), f'`accept_cond` and `dim_cond` must be set on init for `Unet`'
+            c = self.cond_mlp(cond)
+            t = t + c
+
+        # hiddens
 
         h = []
 
@@ -1004,7 +1031,7 @@ class Trainer(Module):
         save_package = dict(
             model = self.accelerator.unwrap_model(self.model).state_dict(),
             ema_model = self.ema_model.state_dict(),
-            optimizer = self.accelerator.unwrap_model(self.optimizer).state_dict(),
+            optimizer = self.optimizer.state_dict(),
         )
 
         torch.save(save_package, str(self.checkpoints_folder / path))

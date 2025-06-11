@@ -180,3 +180,12 @@ $ python train_oxford.py
     url     = {https://api.semanticscholar.org/CorpusID:277510064}
 }
 ```
+
+```bibtex
+@inproceedings{Geng2025MeanFF,
+    title   = {Mean Flows for One-step Generative Modeling},
+    author  = {Zhengyang Geng and Mingyang Deng and Xingjian Bai and J. Zico Kolter and Kaiming He},
+    year    = {2025},
+    url     = {https://api.semanticscholar.org/CorpusID:278769814}
+}
+```

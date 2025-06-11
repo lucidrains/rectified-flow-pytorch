@@ -1,6 +1,10 @@
+# https://arxiv.org/abs/2505.13447
+
 import torch
+from torch import ones, zeros
 from torch.nn import Module
 import torch.nn.functional as F
+from torch.autograd.functional import jvp
 
 def exists(v):
     return v is not None
@@ -16,18 +20,22 @@ def append_dims(t, dims):
     ones = ((1,) * dims)
     return t.reshape(*shape, *ones)
 
-class NanoFlow(Module):
+class MeanFlow(Module):
     def __init__(
         self,
         model: Module,
-        times_cond_kwarg = None,
+        times_cond_kwarg = 'times',
+        integral_start_times_cond_kwarg = 'times_integral_start',
         data_shape = None,
         normalize_data_fn = identity,
         unnormalize_data_fn = identity,
     ):
         super().__init__()
         self.model = model
+
         self.times_cond_kwarg = times_cond_kwarg
+        self.integral_start_times_cond_kwarg = integral_start_times_cond_kwarg
+
         self.data_shape = None
 
         self.normalize_data_fn = normalize_data_fn
@@ -36,12 +44,11 @@ class NanoFlow(Module):
     @torch.no_grad()
     def sample(
         self,
-        steps = 16,
         batch_size = 1,
         data_shape = None,
         **kwargs
     ):
-        assert steps >= 1
+        # Algorithm 2
 
         data_shape = default(data_shape, self.data_shape)
         assert exists(data_shape), 'shape of the data must be passed in, or set at init or during training'
@@ -49,17 +56,7 @@ class NanoFlow(Module):
 
         noise = torch.randn((batch_size, *self.data_shape), device = device)
 
-        times = torch.linspace(0., 1., steps + 1, device = device)[:-1]
-        delta = 1. / steps
-
-        denoised = noise
-
-        for time in times:
-            time = time.expand(batch_size)
-            time_kwarg = {self.times_cond_kwarg: time} if exists(self.times_cond_kwarg) else dict()
-
-            pred_flow = self.model(denoised, **time_kwarg, **kwargs)
-            denoised = denoised + delta * pred_flow
+        denoised = noise - self.model(noise, ones(batch_size, device = device), zeros(batch_size, device = device))
 
         return self.unnormalize_data_fn(denoised)
 
@@ -75,27 +72,25 @@ class NanoFlow(Module):
         # flow logic
 
         times = torch.rand(batch, device = device)
+        integral_start_times = torch.rand(batch, device = device) * times # restrict range to [0, times]
+
         noise = torch.randn_like(data)
-        flow = data - noise # flow is the velocity from noise to data, also what the model is trained to predict
+        flow = noise - data # flow is the velocity from data to noise, also what the model is trained to predict
 
-        padded_times = append_dims(times, ndim - 1)
-        noised_data = noise * (1. - padded_times) + data * padded_times # noise the data with random amounts of noise (time)
+        padded_times, padded_start_times = tuple(append_dims(t, ndim - 1) for t in (times, integral_start_times))
+        noised_data = noise * padded_times + data * (1. - padded_times) # noise the data with random amounts of noise (time)
 
-        time_kwarg = {self.times_cond_kwarg: times} if exists(self.times_cond_kwarg) else dict() # maybe time conditioning, could work without it
-        pred_flow = self.model(noised_data, **time_kwarg, **kwargs)
+        # Algorithm 1
 
-        return F.mse_loss(flow, pred_flow)
+        pred, dudt = jvp(
+            self.model,
+            (noised_data, times, integral_start_times),  # inputs
+            (flow, ones(batch, device = device), zeros(batch, device = device)), # tangents
+            create_graph = True
+        )
 
-# quick test
+        # the new proposed target
 
-if __name__ == '__main__':
-    model = torch.nn.Conv2d(3, 3, 1)
+        target = flow - (padded_times - padded_start_times) * dudt.detach()
 
-    nano_flow = NanoFlow(model)
-    data = torch.randn(16, 3, 16, 16)
-
-    loss = nano_flow(data)
-    loss.backward()
-
-    sampled = nano_flow.sample(batch_size = 16)
-    assert sampled.shape == data.shape
+        return F.mse_loss(pred, target)
