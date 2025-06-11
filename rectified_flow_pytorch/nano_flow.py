@@ -79,7 +79,7 @@ class NanoFlow(Module):
         flow = data - noise # flow is the velocity from noise to data, also what the model is trained to predict
 
         padded_times = append_dims(times, ndim - 1)
-        noised_data = noise * (1. - padded_times) + data * padded_times # noise the data with random amounts of noise (time)
+        noised_data = noise.lerp(data, padded_times) # noise the data with random amounts of noise (time) - lerp is read as noise -> data from 0. to 1.
 
         time_kwarg = {self.times_cond_kwarg: times} if exists(self.times_cond_kwarg) else dict() # maybe time conditioning, could work without it
         pred_flow = self.model(noised_data, **time_kwarg, **kwargs)

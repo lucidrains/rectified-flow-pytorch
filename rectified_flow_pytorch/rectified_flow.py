@@ -418,7 +418,7 @@ class RectifiedFlow(Module):
             # linear interpolation of noise with data using random times
             # x1 * t + x0 * (1 - t) - so from noise (time = 0) to data (time = 1.)
 
-            noised = t * data + (1. - t) * noise
+            noised = noise.lerp(data, t) # noise -> data from 0. to 1.
 
             # the model predicts the flow from the noised data
 

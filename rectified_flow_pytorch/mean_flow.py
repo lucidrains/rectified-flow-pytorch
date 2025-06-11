@@ -78,7 +78,7 @@ class MeanFlow(Module):
         flow = noise - data # flow is the velocity from data to noise, also what the model is trained to predict
 
         padded_times, padded_start_times = tuple(append_dims(t, ndim - 1) for t in (times, integral_start_times))
-        noised_data = noise * padded_times + data * (1. - padded_times) # noise the data with random amounts of noise (time)
+        noised_data = data.lerp(noise, padded_times) # noise the data with random amounts of noise (time) - from data -> noise from 0. to 1.
 
         # Algorithm 1
 
