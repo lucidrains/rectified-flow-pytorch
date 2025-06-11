@@ -24,18 +24,12 @@ class MeanFlow(Module):
     def __init__(
         self,
         model: Module,
-        times_cond_kwarg = 'times',
-        integral_start_times_cond_kwarg = 'times_integral_start',
         data_shape = None,
         normalize_data_fn = identity,
         unnormalize_data_fn = identity,
     ):
         super().__init__()
-        self.model = model
-
-        self.times_cond_kwarg = times_cond_kwarg
-        self.integral_start_times_cond_kwarg = integral_start_times_cond_kwarg
-
+        self.model = model # model must accept three arguments in the order of (<noised data>, <times>, <integral start times>)
         self.data_shape = None
 
         self.normalize_data_fn = normalize_data_fn
@@ -45,8 +39,7 @@ class MeanFlow(Module):
     def sample(
         self,
         batch_size = 1,
-        data_shape = None,
-        **kwargs
+        data_shape = None
     ):
         # Algorithm 2
 
@@ -60,7 +53,7 @@ class MeanFlow(Module):
 
         return self.unnormalize_data_fn(denoised)
 
-    def forward(self, data, **kwargs):
+    def forward(self, data):
         data = self.normalize_data_fn(data)
 
         # shapes and variables

@@ -42,7 +42,6 @@ model = Unet(
 
 mean_flow = MeanFlow(
     model,
-    times_cond_kwarg = 'times',
     normalize_data_fn = lambda t: t * 2. - 1.,
     unnormalize_data_fn = lambda t: (t + 1.) / 2.
 )
