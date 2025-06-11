@@ -4,6 +4,7 @@ import torch
 from torch import ones, zeros
 from torch.nn import Module
 import torch.nn.functional as F
+from contextlib import nullcontext
 from torch.autograd.functional import jvp
 
 def exists(v):
@@ -35,23 +36,27 @@ class MeanFlow(Module):
         self.normalize_data_fn = normalize_data_fn
         self.unnormalize_data_fn = unnormalize_data_fn
 
-    @torch.no_grad()
     def sample(
         self,
         batch_size = 1,
-        data_shape = None
+        data_shape = None,
+        requires_grad = True
     ):
+        context = nullcontext if not requires_grad else torch.no_grad
+
         # Algorithm 2
 
-        data_shape = default(data_shape, self.data_shape)
-        assert exists(data_shape), 'shape of the data must be passed in, or set at init or during training'
-        device = next(self.model.parameters()).device
+        with context():
 
-        noise = torch.randn((batch_size, *self.data_shape), device = device)
+            data_shape = default(data_shape, self.data_shape)
+            assert exists(data_shape), 'shape of the data must be passed in, or set at init or during training'
+            device = next(self.model.parameters()).device
 
-        denoised = noise - self.model(noise, ones(batch_size, device = device), zeros(batch_size, device = device))
+            noise = torch.randn((batch_size, *self.data_shape), device = device)
 
-        return self.unnormalize_data_fn(denoised)
+            denoised = noise - self.model(noise, ones(batch_size, device = device), zeros(batch_size, device = device))
+
+            return self.unnormalize_data_fn(denoised)
 
     def forward(self, data):
         data = self.normalize_data_fn(data)
