@@ -28,11 +28,13 @@ class MeanFlow(Module):
         data_shape = None,
         normalize_data_fn = identity,
         unnormalize_data_fn = identity,
+        use_huber_loss = True
     ):
         super().__init__()
         self.model = model # model must accept three arguments in the order of (<noised data>, <times>, <integral start times>)
         self.data_shape = None
 
+        self.use_huber_loss = use_huber_loss
         self.normalize_data_fn = normalize_data_fn
         self.unnormalize_data_fn = unnormalize_data_fn
 
@@ -91,4 +93,6 @@ class MeanFlow(Module):
 
         target = flow - (padded_times - padded_start_times) * dudt.detach()
 
-        return F.mse_loss(pred, target)
+        loss_fn = F.mse_loss if not self.use_huber_loss else F.huber_loss
+
+        return loss_fn(pred, target)
