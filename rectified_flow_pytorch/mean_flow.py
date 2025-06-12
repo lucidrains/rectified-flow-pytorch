@@ -28,7 +28,8 @@ class MeanFlow(Module):
         data_shape = None,
         normalize_data_fn = identity,
         unnormalize_data_fn = identity,
-        use_huber_loss = True
+        use_huber_loss = True,
+        prob_default_flow_obj = 0.5
     ):
         super().__init__()
         self.model = model # model must accept three arguments in the order of (<noised data>, <times>, <integral start times>)
@@ -37,6 +38,11 @@ class MeanFlow(Module):
         self.use_huber_loss = use_huber_loss
         self.normalize_data_fn = normalize_data_fn
         self.unnormalize_data_fn = unnormalize_data_fn
+
+        # they do 25-50% normal flow matching obj
+
+        assert 0. <= prob_default_flow_obj <= 1.
+        self.prob_default_flow_obj = prob_default_flow_obj
 
     def sample(
         self,
@@ -65,6 +71,9 @@ class MeanFlow(Module):
         # shapes and variables
 
         shape, ndim = data.shape, data.ndim
+
+        prob_time_end_start_same = self.prob_default_flow_obj
+
         self.data_shape = default(self.data_shape, shape[1:]) # store last data shape for inference
         batch, device = shape[0], data.device
 
@@ -72,6 +81,14 @@ class MeanFlow(Module):
 
         times = torch.rand(batch, device = device)
         integral_start_times = torch.rand(batch, device = device) * times # restrict range to [0, times]
+
+        # some set prob of the time, normal flow matching training (times == start integral times)
+
+        if prob_time_end_start_same > 0.:
+            prob_same = torch.rand(batch, device = device) < prob_time_end_start_same
+            integral_start_times = torch.where(prob_same, times, integral_start_times)
+
+        # derive flows
 
         noise = torch.randn_like(data)
         flow = noise - data # flow is the velocity from data to noise, also what the model is trained to predict
