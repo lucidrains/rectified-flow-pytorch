@@ -29,7 +29,9 @@ class MeanFlow(Module):
         normalize_data_fn = identity,
         unnormalize_data_fn = identity,
         use_huber_loss = True,
-        prob_default_flow_obj = 0.5
+        prob_default_flow_obj = 0.5,
+        add_recon_loss = False,
+        recon_loss_weight = 1.
     ):
         super().__init__()
         self.model = model # model must accept three arguments in the order of (<noised data>, <times>, <integral start times>)
@@ -43,6 +45,11 @@ class MeanFlow(Module):
 
         assert 0. <= prob_default_flow_obj <= 1.
         self.prob_default_flow_obj = prob_default_flow_obj
+
+        # recon loss
+
+        self.add_recon_loss = add_recon_loss and recon_loss_weight > 0
+        self.recon_loss_weight = recon_loss_weight
 
     def sample(
         self,
@@ -65,7 +72,12 @@ class MeanFlow(Module):
 
         return self.unnormalize_data_fn(denoised)
 
-    def forward(self, data):
+    def forward(
+        self,
+        data,
+        return_loss_breakdown = False
+    ):
+
         data = self.normalize_data_fn(data)
 
         # shapes and variables
@@ -107,8 +119,33 @@ class MeanFlow(Module):
 
         # the new proposed target
 
-        target = flow - (padded_times - padded_start_times) * rate_avg_vel_change.detach()
+        integral = (padded_times - padded_start_times) * rate_avg_vel_change.detach()
+
+        target = flow - integral
 
         loss_fn = F.mse_loss if not self.use_huber_loss else F.huber_loss
 
-        return loss_fn(pred, target)
+        flow_loss = loss_fn(pred, target)
+
+        if not self.add_recon_loss:
+            if not return_loss_breakdown:
+                return flow_loss
+
+            return flow_loss, (flow_loss,)
+
+        # add predicted data recon loss, maybe adds stability, not sure
+
+        pred_data = (pred + integral) * padded_times
+        recon_loss = loss_fn(pred_data, data)
+
+        total_loss = (
+            flow_loss +
+            recon_loss * self.recon_loss_weight
+        )
+
+        if not return_loss_breakdown:
+            return total_loss
+
+        loss_breakdown = (flow_loss, recon_loss)
+
+        return total_loss, loss_breakdown

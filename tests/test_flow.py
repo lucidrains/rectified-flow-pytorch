@@ -19,7 +19,9 @@ def test_nano_flow():
     assert sampled.shape == data.shape
 
 
-def test_mean_flow():
+@pytest.mark.parametrize('add_recon_loss', (False, True))
+def test_mean_flow(add_recon_loss):
+
     from einx import add
     from rectified_flow_pytorch.mean_flow import MeanFlow
 
@@ -33,7 +35,7 @@ def test_mean_flow():
 
     model = Unet()
 
-    mean_flow = MeanFlow(model)
+    mean_flow = MeanFlow(model, add_recon_loss = add_recon_loss)
     data = torch.randn(16, 3, 16, 16)
 
     loss = mean_flow(data)
