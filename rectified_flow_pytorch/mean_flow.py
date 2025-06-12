@@ -1,11 +1,12 @@
 # https://arxiv.org/abs/2505.13447
 
+from contextlib import nullcontext
+
 import torch
 from torch import ones, zeros
 from torch.nn import Module
 import torch.nn.functional as F
-from contextlib import nullcontext
-from torch.autograd.functional import jvp
+from torch.func import jvp
 
 def exists(v):
     return v is not None
@@ -114,7 +115,6 @@ class MeanFlow(Module):
             self.model,
             (noised_data, times, integral_start_times),  # inputs
             (flow, ones(batch, device = device), zeros(batch, device = device)), # tangents
-            create_graph = True
         )
 
         # the new proposed target
