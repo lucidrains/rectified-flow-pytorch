@@ -44,21 +44,20 @@ class MeanFlow(Module):
         data_shape = None,
         requires_grad = False
     ):
+        data_shape = default(data_shape, self.data_shape)
+        assert exists(data_shape), 'shape of the data must be passed in, or set at init or during training'
+        device = next(self.model.parameters()).device
+
         context = nullcontext if not requires_grad else torch.no_grad
 
         # Algorithm 2
 
         with context():
-
-            data_shape = default(data_shape, self.data_shape)
-            assert exists(data_shape), 'shape of the data must be passed in, or set at init or during training'
-            device = next(self.model.parameters()).device
-
             noise = torch.randn((batch_size, *self.data_shape), device = device)
 
             denoised = noise - self.model(noise, ones(batch_size, device = device), zeros(batch_size, device = device))
 
-            return self.unnormalize_data_fn(denoised)
+        return self.unnormalize_data_fn(denoised)
 
     def forward(self, data):
         data = self.normalize_data_fn(data)
@@ -82,7 +81,7 @@ class MeanFlow(Module):
 
         # Algorithm 1
 
-        pred, dudt = jvp(
+        pred, rate_avg_vel_change = jvp(
             self.model,
             (noised_data, times, integral_start_times),  # inputs
             (flow, ones(batch, device = device), zeros(batch, device = device)), # tangents
@@ -91,7 +90,7 @@ class MeanFlow(Module):
 
         # the new proposed target
 
-        target = flow - (padded_times - padded_start_times) * dudt.detach()
+        target = flow - (padded_times - padded_start_times) * rate_avg_vel_change.detach()
 
         loss_fn = F.mse_loss if not self.use_huber_loss else F.huber_loss
 
