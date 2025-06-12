@@ -135,7 +135,7 @@ class MeanFlow(Module):
 
         # add predicted data recon loss, maybe adds stability, not sure
 
-        pred_data = (pred + integral) * padded_times
+        pred_data = noised_data - (pred + integral) * padded_times
         recon_loss = loss_fn(pred_data, data)
 
         total_loss = (
