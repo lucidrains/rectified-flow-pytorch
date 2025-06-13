@@ -23,8 +23,6 @@ from torch.utils.data import TensorDataset, DataLoader
 
 import gymnasium as gym
 
-from assoc_scan import AssocScan
-
 from einops import rearrange, repeat, pack
 
 from ema_pytorch import EMA
@@ -42,9 +40,9 @@ device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 Memory = namedtuple('Memory', [
     'state',
     'action',
-    'pred_q_value',
     'reward',
-    'is_boundary'
+    'next_state',
+    'done'
 ])
 
 # helpers
