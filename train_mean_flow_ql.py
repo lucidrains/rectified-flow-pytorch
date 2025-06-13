@@ -112,7 +112,7 @@ class Agent(Module):
             actions,
             rewards,
             next_states,
-            is_boundaries,
+            dones,
         ) = zip(*memories)
         
         actions = [tensor(action) for action in actions]
@@ -124,11 +124,12 @@ class Agent(Module):
         states = to_torch_tensor(states)
         next_states = to_torch_tensor(next_states)
         actions = to_torch_tensor(actions)
+        dones = to_torch_tensor(dones)
 
         # prepare dataloader for policy phase training
 
         learnable = tensor(learnable).to(device)
-        data = (states, actions, pred_q_value, returns)
+        data = (states, actions, rewards, dones, next_states)
         data = tuple(t[learnable] for t in data)
 
         dataset = TensorDataset(*data)
@@ -138,7 +139,7 @@ class Agent(Module):
         # updating actor / critic
 
         for _ in range(self.epochs):
-            for states, actions, rewards, next_states in enumerate(dl):
+            for states, actions, rewards, terminal, next_states in enumerate(dl):
 
                 # the flow q-learning proposed here https://seohong.me/projects/fql/ is now simplified
 
@@ -150,7 +151,7 @@ class Agent(Module):
                 next_state_action = cat((next_states, next_actions), dim = -1)
 
                 pred_q = self.critic(state_action)
-                target_q = rewards + self.discount_factor * self.ema_critic(next_state_action)
+                target_q = rewards + terminal * self.discount_factor * self.ema_critic(next_state_action)
                 
                 critic_loss = F.mse_loss(pred_q, target_q)
                 critic_loss.backward()
