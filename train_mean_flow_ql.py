@@ -1,6 +1,7 @@
 
 # along same veins as https://arxiv.org/abs/2502.02538
 # but no more distillation, BC, and all that
+# before you email me, just go ahead and write the paper, no cites needed if it works
 
 from __future__ import annotations
 
