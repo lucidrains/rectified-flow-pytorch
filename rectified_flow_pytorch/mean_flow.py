@@ -1,9 +1,10 @@
 # https://arxiv.org/abs/2505.13447
 
+from random import random
 from contextlib import nullcontext
 
 import torch
-from torch import ones, zeros
+from torch import tensor, ones, zeros
 from torch.nn import Module
 import torch.nn.functional as F
 from torch.func import jvp
@@ -93,13 +94,15 @@ class MeanFlow(Module):
         # flow logic
 
         times = torch.rand(batch, device = device)
-        integral_start_times = torch.rand(batch, device = device) * times # restrict range to [0, times]
 
         # some set prob of the time, normal flow matching training (times == start integral times)
 
-        if prob_time_end_start_same > 0.:
-            prob_same = torch.rand(batch, device = device) < prob_time_end_start_same
-            integral_start_times = torch.where(prob_same, times, integral_start_times)
+        normal_flow_match_obj = prob_time_end_start_same > 0. and prob_time_end_start_same < random()
+
+        if normal_flow_match_obj:
+            integral_start_times = times
+        else:
+            integral_start_times = torch.rand(batch, device = device) * times # restrict range to [0, times]
 
         # derive flows
 
@@ -109,13 +112,20 @@ class MeanFlow(Module):
         padded_times, padded_start_times = tuple(append_dims(t, ndim - 1) for t in (times, integral_start_times))
         noised_data = data.lerp(noise, padded_times) # noise the data with random amounts of noise (time) - from data -> noise from 0. to 1.
 
-        # Algorithm 1
+        if normal_flow_match_obj:
+            # Normal flow matching without jvp 25-50% of the time
 
-        pred, rate_avg_vel_change = jvp(
-            self.model,
-            (noised_data, times, integral_start_times),  # inputs
-            (flow, ones(batch, device = device), zeros(batch, device = device)), # tangents
-        )
+            pred, rate_avg_vel_change = (
+                self.model(noised_data, times, integral_start_times), tensor(0., device = device)
+            )
+        else:
+            # Algorithm 1
+
+            pred, rate_avg_vel_change = jvp(
+                self.model,
+                (noised_data, times, integral_start_times),  # inputs
+                (flow, ones(batch, device = device), zeros(batch, device = device)), # tangents
+            )
 
         # the new proposed target
 
