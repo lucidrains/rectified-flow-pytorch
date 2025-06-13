@@ -41,6 +41,7 @@ Memory = namedtuple('Memory', [
     'learnable',
     'state',
     'action',
+    'pred_q_value',
     'reward',
     'is_boundary'
 ])
@@ -84,7 +85,7 @@ class Agent(Module):
             accept_cond = True
         )
 
-        self.critic = MLP(state_dim, critic_hidden_dim, num_actions)
+        self.critic = MLP(state_dim + num_actions, critic_hidden_dim, 1)
 
         self.ema_critic = EMA(self.critic, beta = ema_decay, include_online_model = False)
 
@@ -109,6 +110,7 @@ class Agent(Module):
             learnable,
             states,
             actions,
+            pred_q_value,
             rewards,
             is_boundaries,
         ) = zip(*memories)
@@ -135,7 +137,7 @@ class Agent(Module):
         # prepare dataloader for policy phase training
 
         learnable = tensor(learnable).to(device)
-        data = (states, actions, returns)
+        data = (states, actions, pred_q_value, returns)
         data = tuple(t[learnable] for t in data)
 
         dataset = TensorDataset(*data)
@@ -145,7 +147,7 @@ class Agent(Module):
         # updating actor / critic
 
         for _ in range(self.epochs):
-            for i, (states, actions, returns) in enumerate(dl):
+            for i, (states, actions, pred_q_value, returns) in enumerate(dl):
                 pass
 
 # main
@@ -220,16 +222,18 @@ def main(
             time += 1
 
             with torch.no_grad():
-                action = agent.mean_flow_actor.sample(cond = state)
-                action = rearrange(action, '1 ... -> ...')
+                actions = agent.mean_flow_actor.sample(cond = state)
+                actions = rearrange(actions, '1 ... -> ...')
 
-            next_state, reward, terminated, truncated, _ = env.step(action.tolist())
+            next_state, reward, terminated, truncated, _ = env.step(actions.tolist())
 
             next_state = torch.from_numpy(next_state).to(device)
 
             reward = float(reward)
 
-            memory = Memory(True, state, action, reward, terminated)
+            pred_q_value = self.ema_critic(cat(state, actions))
+
+            memory = Memory(True, state, action, pred_q_value, reward, terminated)
 
             memories.append(memory)
 
