@@ -200,3 +200,14 @@ $ python train_oxford.py
     url     = {https://api.semanticscholar.org/CorpusID:276421559}
 }
 ```
+
+```bibtex
+@article{Park2025FlowQ,
+    title   = {Flow Q-Learning},
+    author  = {Seohong Park and Qiyang Li and Sergey Levine},
+    journal = {ArXiv},
+    year    = {2025},
+    volume  = {abs/2502.02538},
+    url     = {https://api.semanticscholar.org/CorpusID:276107180}
+}
+```
