@@ -151,7 +151,7 @@ class Agent(Module):
                 next_state_action = cat((next_states, next_actions), dim = -1)
 
                 pred_q = self.critic(state_action)
-                target_q = rewards + terminal * self.discount_factor * self.ema_critic(next_state_action)
+                target_q = rewards + (1. - terminal) * self.discount_factor * self.ema_critic(next_state_action)
                 
                 critic_loss = F.mse_loss(pred_q, target_q)
                 critic_loss.backward()
