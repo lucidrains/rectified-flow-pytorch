@@ -28,7 +28,7 @@ class NanoFlow(Module):
         super().__init__()
         self.model = model
         self.times_cond_kwarg = times_cond_kwarg
-        self.data_shape = None
+        self.data_shape = data_shape
 
         self.normalize_data_fn = normalize_data_fn
         self.unnormalize_data_fn = unnormalize_data_fn
@@ -47,7 +47,7 @@ class NanoFlow(Module):
         assert exists(data_shape), 'shape of the data must be passed in, or set at init or during training'
         device = next(self.model.parameters()).device
 
-        noise = torch.randn((batch_size, *self.data_shape), device = device)
+        noise = torch.randn((batch_size, *data_shape), device = device)
 
         times = torch.linspace(0., 1., steps + 1, device = device)[:-1]
         delta = 1. / steps
