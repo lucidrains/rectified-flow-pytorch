@@ -1,6 +1,6 @@
 [project]
 name = "rectified-flow-pytorch"
-version = "0.3.12"
+version = "0.3.14"
 description = "Rectified Flow in Pytorch"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
@@ -56,6 +56,11 @@ examples_ql = [
 
 test = [
     "pytest"
+]
+
+[tool.pytest.ini_options]
+pythonpath = [
+  "."
 ]
 
 [build-system]

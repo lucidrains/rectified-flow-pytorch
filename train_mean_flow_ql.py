@@ -78,11 +78,14 @@ class Agent(Module):
 
         self.actor = MLP(state_dim, actor_hidden_dim, num_actions)
 
-        self.wrapped_actor = MeanFlow(self.actor)
+        self.mean_flow_actor = MeanFlow(
+            self.actor,
+            data_shape = (num_actions,),
+            accept_cond = True
+        )
 
         self.critic = MLP(state_dim, critic_hidden_dim, num_actions)
 
-        self.ema_actor = EMA(self.actor, beta = ema_decay, include_online_model = False)
         self.ema_critic = EMA(self.critic, beta = ema_decay, include_online_model = False)
 
         self.opt_actor = Adam(self.actor.parameters(), lr = lr, betas = betas)
@@ -113,7 +116,7 @@ class Agent(Module):
         actions = [tensor(action) for action in actions]
         masks = [(1. - float(is_boundary)) for is_boundary in is_boundaries]
 
-        # calculate generalized advantage estimate
+        # calculate discounted sum of rewards
 
         returns = calc_returns(
             rewards = tensor(rewards).to(device),
@@ -139,7 +142,7 @@ class Agent(Module):
 
         dl = DataLoader(dataset, batch_size = self.batch_size, shuffle = True)
 
-        # policy phase training, similar to original PPO
+        # updating actor / critic
 
         for _ in range(self.epochs):
             for i, (states, actions, returns) in enumerate(dl):
@@ -217,7 +220,8 @@ def main(
             time += 1
 
             with torch.no_grad():
-                action = agent.actor.forward(state)
+                action = agent.mean_flow_actor.sample(cond = state)
+                action = rearrange(action, '1 ... -> ...')
 
             next_state, reward, terminated, truncated, _ = env.step(action.tolist())
 
@@ -259,6 +263,8 @@ def main(
 
             if done:
                 break
+
+# main
 
 if __name__ == '__main__':
     fire.Fire(main)

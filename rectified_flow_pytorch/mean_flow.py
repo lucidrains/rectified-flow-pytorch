@@ -12,6 +12,9 @@ from torch.func import jvp
 def exists(v):
     return v is not None
 
+def xnor(x, y):
+    return not (x ^ y)
+
 def default(v, d):
     return v if exists(v) else d
 
@@ -33,11 +36,12 @@ class MeanFlow(Module):
         use_huber_loss = True,
         prob_default_flow_obj = 0.5,
         add_recon_loss = False,
-        recon_loss_weight = 1.
+        recon_loss_weight = 1.,
+        accept_cond = False
     ):
         super().__init__()
-        self.model = model # model must accept three arguments in the order of (<noised data>, <times>, <integral start times>)
-        self.data_shape = None
+        self.model = model # model must accept three arguments in the order of (<noised data>, <times>, <integral start times>, <maybe condition?>)
+        self.data_shape = data_shape
 
         self.use_huber_loss = use_huber_loss
         self.normalize_data_fn = normalize_data_fn
@@ -53,32 +57,48 @@ class MeanFlow(Module):
         self.add_recon_loss = add_recon_loss and recon_loss_weight > 0
         self.recon_loss_weight = recon_loss_weight
 
+        # accepting conditioning
+
+        self.accept_cond = accept_cond
+
     def sample(
         self,
         batch_size = 1,
         data_shape = None,
-        requires_grad = False
+        requires_grad = False,
+        cond = None
     ):
+        assert xnor(self.accept_cond, exists(cond))
+
         data_shape = default(data_shape, self.data_shape)
         assert exists(data_shape), 'shape of the data must be passed in, or set at init or during training'
         device = next(self.model.parameters()).device
 
         context = nullcontext if not requires_grad else torch.no_grad
 
+        # maybe condition
+
+        maybe_cond = ()
+
+        if self.accept_cond:
+            maybe_cond = (cond,)
+
         # Algorithm 2
 
         with context():
-            noise = torch.randn((batch_size, *self.data_shape), device = device)
+            noise = torch.randn((batch_size, *data_shape), device = device)
 
-            denoised = noise - self.model(noise, ones(batch_size, device = device), zeros(batch_size, device = device))
+            denoised = noise - self.model(noise, ones(batch_size, device = device), zeros(batch_size, device = device), *maybe_cond)
 
         return self.unnormalize_data_fn(denoised)
 
     def forward(
         self,
         data,
-        return_loss_breakdown = False
+        return_loss_breakdown = False,
+        cond = None
     ):
+        assert xnor(self.accept_cond, exists(cond))
 
         data = self.normalize_data_fn(data)
 
@@ -112,19 +132,29 @@ class MeanFlow(Module):
         padded_times, padded_start_times = tuple(append_dims(t, ndim - 1) for t in (times, integral_start_times))
         noised_data = data.lerp(noise, padded_times) # noise the data with random amounts of noise (time) - from data -> noise from 0. to 1.
 
+        # model forward with maybe jvp
+
+        inputs = (noised_data, times, integral_start_times)
+        tangents = (flow, ones(batch, device = device), zeros(batch, device = device))
+
+        if self.accept_cond:
+            inputs = (*inputs, cond)
+            tangents = (*tangents, cond)
+
         if normal_flow_match_obj:
             # Normal flow matching without jvp 25-50% of the time
 
             pred, rate_avg_vel_change = (
-                self.model(noised_data, times, integral_start_times), tensor(0., device = device)
+                self.model(*inputs),
+                tensor(0., device = device)
             )
         else:
             # Algorithm 1
 
             pred, rate_avg_vel_change = jvp(
                 self.model,
-                (noised_data, times, integral_start_times),  # inputs
-                (flow, ones(batch, device = device), zeros(batch, device = device)), # tangents
+                inputs,
+                tangents
             )
 
         # the new proposed target
