@@ -23,6 +23,7 @@ classifiers=[
 
 dependencies = [
     'accelerate',
+    'assoc-scan',
     'einx>=0.3.0',
     'einops>=0.8.0',
     'ema-pytorch>=0.5.2',
@@ -45,6 +46,7 @@ examples = [
 
 examples_ql = [
     "box2d-py",
+    "fire",
     "gymnasium[box2d]>=1.0.0",
     "moviepy>=1.0.3",
     "numpy>=2.2.5",
