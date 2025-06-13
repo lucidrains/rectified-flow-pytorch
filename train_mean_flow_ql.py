@@ -77,7 +77,7 @@ class Agent(Module):
     ):
         super().__init__()
 
-        self.actor = MLP(state_dim, actor_hidden_dim, num_actions)
+        self.actor = MLP(state_dim + num_actions + 2, actor_hidden_dim, num_actions) # naively concat time and integral start time -> mlp
 
         self.mean_flow_actor = MeanFlow(
             self.actor,
@@ -110,28 +110,19 @@ class Agent(Module):
             learnable,
             states,
             actions,
-            pred_q_value,
             rewards,
+            next_states,
             is_boundaries,
         ) = zip(*memories)
         
         actions = [tensor(action) for action in actions]
-        masks = [(1. - float(is_boundary)) for is_boundary in is_boundaries]
-
-        # calculate discounted sum of rewards
-
-        returns = calc_returns(
-            rewards = tensor(rewards).to(device),
-            masks = tensor(masks).to(device),
-            discount_factor = self.discount_factor,
-            use_accelerated = False
-        )
 
         # convert values to torch tensors
 
         to_torch_tensor = lambda t: stack(t).to(device).detach()
 
         states = to_torch_tensor(states)
+        next_states = to_torch_tensor(next_states)
         actions = to_torch_tensor(actions)
 
         # prepare dataloader for policy phase training
@@ -147,8 +138,41 @@ class Agent(Module):
         # updating actor / critic
 
         for _ in range(self.epochs):
-            for i, (states, actions, pred_q_value, returns) in enumerate(dl):
-                pass
+            for states, actions, rewards, next_states in enumerate(dl):
+
+                # the flow q-learning proposed here https://seohong.me/projects/fql/ is now simplified
+
+                next_actions = self.mean_flow_actor(cond = next_states)
+
+                # learn critic
+
+                state_action = cat((states, actions), dim = -1)
+                next_state_action = cat((next_states, next_actions), dim = -1)
+
+                pred_q = self.critic(state_action)
+                target_q = self.ema_critic(next_state_action)
+
+                critic_loss = F.mse_loss(pred_q, target_q)
+                critic_loss.backward()
+
+                self.opt_critic.step()
+                self.opt_critic.zero_grad()
+
+                # learn mean flow actor
+
+                flow_loss = self.mean_flow(actions, cond = states)
+
+                sampled_action = self.mean_flow_actor.sample(cond = states, requires_grad = True) # 1-step sample from mean flow paper, no more issue
+
+                with torch.no_grad():
+                    state_action = cat((state, sampled_action), dim = -1)
+                    critique = self.critic(state_action)
+
+                actor_loss = critique + flow_loss
+                actor_loss.backward()
+
+                self.opt_actor.step()
+                self.opt_actor.zero_grad()
 
 # main
 
@@ -233,7 +257,7 @@ def main(
 
             pred_q_value = self.ema_critic(cat(state, actions))
 
-            memory = Memory(True, state, action, pred_q_value, reward, terminated)
+            memory = Memory(True, state, action, reward, next_state, terminated)
 
             memories.append(memory)
 
@@ -243,17 +267,6 @@ def main(
 
             updating_agent = divisible_by(time, update_timesteps)
             done = terminated or truncated or updating_agent
-
-            # take care of truncated by adding a non-learnable memory storing the next value for GAE
-
-            if done and not terminated:
-                bootstrap_value_memory = memory._replace(
-                    state = state,
-                    learnable = False,
-                    is_boundary = True,
-                )
-
-                memories.append(bootstrap_value_memory)
 
             # updating of the agent
 

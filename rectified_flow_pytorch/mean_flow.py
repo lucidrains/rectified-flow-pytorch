@@ -63,7 +63,7 @@ class MeanFlow(Module):
 
     def sample(
         self,
-        batch_size = 1,
+        batch_size = None,
         data_shape = None,
         requires_grad = False,
         cond = None
@@ -81,7 +81,10 @@ class MeanFlow(Module):
         maybe_cond = ()
 
         if self.accept_cond:
+            batch_size = cond.shape[0]
             maybe_cond = (cond,)
+
+        batch_size = default(batch_size, 1)
 
         # Algorithm 2
 
