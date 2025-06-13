@@ -43,6 +43,15 @@ examples = [
     "datasets",
 ]
 
+examples_ql = [
+    "box2d-py",
+    "gymnasium[box2d]>=1.0.0",
+    "moviepy>=1.0.3",
+    "numpy>=2.2.5",
+    "tqdm",
+    "x-mlps-pytorch>=0.0.20",
+]
+
 test = [
     "pytest"
 ]
