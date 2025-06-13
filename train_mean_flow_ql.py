@@ -25,6 +25,8 @@ import gymnasium as gym
 
 from assoc_scan import AssocScan
 
+from einops import rearrange, repeat, pack
+
 from ema_pytorch import EMA
 
 from x_mlps_pytorch import MLP
@@ -38,7 +40,6 @@ device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 # memory tuple
 
 Memory = namedtuple('Memory', [
-    'learnable',
     'state',
     'action',
     'pred_q_value',
@@ -59,6 +60,37 @@ def divisible_by(num, den):
 
 # agent
 
+class Actor(Module):
+    def __init__(self, *dims):
+        super().__init__()
+        self.denoiser_mlp = MLP(*dims)
+
+    def forward(
+        self,
+        noised_data,
+        times,
+        integral_start_times,
+        states
+    ):
+        noise_and_cond = cat((noised_data, states), dim = -1)
+
+        if noise_and_cond.ndim == 2:
+            times = rearrange(times, 'b -> b 1')
+            integral_start_times = rearrange(integral_start_times, 'b -> b 1')
+
+        actor_input = cat((noise_and_cond, times, integral_start_times), dim = -1)
+        return self.denoiser_mlp(actor_input)
+
+class Critic(Module):
+    def __init__(self, *dims):
+        super().__init__()
+        self.mlp = MLP(*dims)
+
+    def forward(self, states, actions):
+        states_actions = cat((states, actions), dim = -1)
+        q_value = self.mlp(states_actions)
+        return rearrange(q_value, '... 1 -> ...')
+
 class Agent(Module):
     def __init__(
         self,
@@ -77,7 +109,7 @@ class Agent(Module):
     ):
         super().__init__()
 
-        self.actor = MLP(state_dim + num_actions + 2, actor_hidden_dim, num_actions) # naively concat time and integral start time -> mlp
+        self.actor = Actor(state_dim + num_actions + 2, actor_hidden_dim, num_actions) # naively concat time and integral start time -> mlp
 
         self.mean_flow_actor = MeanFlow(
             self.actor,
@@ -85,7 +117,7 @@ class Agent(Module):
             accept_cond = True
         )
 
-        self.critic = MLP(state_dim + num_actions, critic_hidden_dim, 1)
+        self.critic = Critic(state_dim + num_actions, critic_hidden_dim, 1)
 
         self.ema_critic = EMA(self.critic, beta = ema_decay, include_online_model = False)
 
@@ -107,15 +139,12 @@ class Agent(Module):
         # retrieve and prepare data from memory for training
 
         (
-            learnable,
             states,
             actions,
             rewards,
             next_states,
             dones,
         ) = zip(*memories)
-        
-        actions = [tensor(action) for action in actions]
 
         # convert values to torch tensors
 
@@ -123,14 +152,13 @@ class Agent(Module):
 
         states = to_torch_tensor(states)
         next_states = to_torch_tensor(next_states)
+        rewards = to_torch_tensor(rewards)
         actions = to_torch_tensor(actions)
         dones = to_torch_tensor(dones)
 
         # prepare dataloader for policy phase training
 
-        learnable = tensor(learnable).to(device)
         data = (states, actions, rewards, dones, next_states)
-        data = tuple(t[learnable] for t in data)
 
         dataset = TensorDataset(*data)
 
@@ -139,20 +167,17 @@ class Agent(Module):
         # updating actor / critic
 
         for _ in range(self.epochs):
-            for states, actions, rewards, terminal, next_states in enumerate(dl):
+            for states, actions, rewards, terminal, next_states in dl:
 
                 # the flow q-learning proposed here https://seohong.me/projects/fql/ is now simplified
 
-                next_actions = self.mean_flow_actor(cond = next_states)
+                next_actions = self.mean_flow_actor.sample(cond = next_states)
 
                 # learn critic
 
-                state_action = cat((states, actions), dim = -1)
-                next_state_action = cat((next_states, next_actions), dim = -1)
+                pred_q = self.critic(states, actions)
+                target_q = rewards.float() + (~terminal).float() * self.discount_factor * self.ema_critic(next_states, next_actions)
 
-                pred_q = self.critic(state_action)
-                target_q = rewards + (1. - terminal) * self.discount_factor * self.ema_critic(next_state_action)
-                
                 critic_loss = F.mse_loss(pred_q, target_q)
                 critic_loss.backward()
 
@@ -161,15 +186,14 @@ class Agent(Module):
 
                 # learn mean flow actor
 
-                flow_loss = self.mean_flow(actions, cond = states)
+                flow_loss = self.mean_flow_actor(actions, cond = states)
 
-                sampled_action = self.mean_flow_actor.sample(cond = states, requires_grad = True) # 1-step sample from mean flow paper, no more issue
+                sampled_actions = self.mean_flow_actor.sample(cond = states, requires_grad = True) # 1-step sample from mean flow paper, no more issue
 
                 with torch.no_grad():
-                    state_action = cat((state, sampled_action), dim = -1)
-                    q_value = self.critic(state_action)
+                    q_value = self.critic(states, sampled_actions)
 
-                actor_loss = -q_value + flow_loss
+                actor_loss = -q_value.mean() + flow_loss
                 actor_loss.backward()
 
                 self.opt_actor.step()
@@ -247,18 +271,15 @@ def main(
             time += 1
 
             with torch.no_grad():
-                actions = agent.mean_flow_actor.sample(cond = state)
+                state_with_one_batch = rearrange(state, 'd -> 1 d')
+                actions = agent.mean_flow_actor.sample(cond = state_with_one_batch)
                 actions = rearrange(actions, '1 ... -> ...')
 
             next_state, reward, terminated, truncated, _ = env.step(actions.tolist())
 
             next_state = torch.from_numpy(next_state).to(device)
 
-            reward = float(reward)
-
-            pred_q_value = self.ema_critic(cat(state, actions))
-
-            memory = Memory(True, state, action, reward, next_state, terminated)
+            memory = Memory(state, actions, tensor(reward), next_state, tensor(terminated))
 
             memories.append(memory)
 
@@ -272,7 +293,6 @@ def main(
             # updating of the agent
 
             if updating_agent:
-                continue
                 agent.learn(memories)
                 num_policy_updates += 1
                 memories.clear()
