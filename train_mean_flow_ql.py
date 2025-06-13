@@ -167,9 +167,9 @@ class Agent(Module):
 
                 with torch.no_grad():
                     state_action = cat((state, sampled_action), dim = -1)
-                    critique = self.critic(state_action)
+                    q_value = self.critic(state_action)
 
-                actor_loss = critique + flow_loss
+                actor_loss = -q_value + flow_loss
                 actor_loss.backward()
 
                 self.opt_actor.step()
