@@ -83,18 +83,19 @@ class Actor(Module):
 class Critic(Module):
     def __init__(self, **kwargs):
         super().__init__()
-        self.ff = GroupedFeedforwards(**kwargs, groups = 2)
+        self.ff = GroupedFeedforwards(**kwargs, groups = 3)
 
     def forward(self, states, actions):
         states_actions = cat((states, actions), dim = -1)
         q_values = self.ff(states_actions)
         q_values = rearrange(q_values, '... 1 -> ...')
 
-        # treating overestimation bias w/ dual critic trick
-        softmin = (-q_values * 1e1).softmax(dim = -1)
-        q_values = einsum(q_values, softmin, '... g, ... g -> ...')
+        # treating overestimation bias w/ N critics trick
 
-        return q_values
+        softmin = (-q_values * 1e1).softmax(dim = -1)
+        softmin_q_value = einsum(q_values, softmin, '... g, ... g -> ...')
+
+        return softmin_q_value
 
 class Agent(Module):
     def __init__(
