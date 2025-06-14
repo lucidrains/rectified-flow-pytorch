@@ -75,7 +75,7 @@ class MeanFlow(Module):
         assert exists(data_shape), 'shape of the data must be passed in, or set at init or during training'
         device = next(self.model.parameters()).device
 
-        context = nullcontext if not requires_grad else torch.no_grad
+        context = nullcontext if requires_grad else torch.no_grad
 
         # maybe condition
 

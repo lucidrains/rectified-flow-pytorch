@@ -120,7 +120,8 @@ class Agent(Module):
         self.mean_flow_actor = MeanFlow(
             self.actor,
             data_shape = (num_actions,),
-            accept_cond = True
+            accept_cond = True,
+            add_recon_loss = True
         )
 
         self.critic = Critic(
@@ -167,7 +168,7 @@ class Agent(Module):
 
         # updating actor / critic
 
-        for _ in range(self.epochs):
+        with tqdm(range(self.epochs)) as pbar:
             for states, actions, rewards, next_states, terminal in dl:
 
                 # the flow q-learning proposed here https://seohong.me/projects/fql/ is now simplified
@@ -189,12 +190,17 @@ class Agent(Module):
 
                 noise = torch.randn_like(actions)
 
+                # flow loss
+
                 flow_loss = self.mean_flow_actor(actions, cond = states, noise = noise)
+
+                # actor learning to maximize q value
 
                 sampled_actions = self.mean_flow_actor.sample(cond = states, noise = noise, requires_grad = True) # 1-step sample from mean flow paper, no more issue
 
-                with torch.no_grad():
-                    q_value = self.ema_critic(states, sampled_actions.clamp(-1., 1.))
+                q_value = self.ema_critic(states, sampled_actions.clamp(-1., 1.))
+
+                # total actor loss
 
                 actor_loss = -q_value.mean() + flow_loss * self.flow_loss_weight
                 actor_loss.backward()
@@ -202,7 +208,10 @@ class Agent(Module):
                 self.opt_actor.step()
                 self.opt_actor.zero_grad()
 
-                print(f'critic: {critic_loss.item():.3f} | actor flow: {flow_loss.item():.3f} | actor q value: {q_value.mean().item():.3f}')
+                pbar.set_description(f'critic: {critic_loss.item():.3f} | actor flow: {flow_loss.item():.3f} | actor q value: {q_value.mean().item():.3f}')
+
+        pbar.update(1)
+
 # main
 
 def main(
@@ -220,7 +229,7 @@ def main(
     lam = 0.95,
     discount_factor = 0.99,
     ema_decay = 0.95,
-    update_timesteps = 5000,
+    update_timesteps = 10000,
     epochs = 5,
     render = True,
     render_every_eps = 250,
