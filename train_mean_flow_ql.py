@@ -78,7 +78,8 @@ class Actor(Module):
         integral_start_times = rearrange(integral_start_times, 'b -> b 1')
 
         actor_input = cat((noise_and_cond, times, integral_start_times), dim = -1)
-        return self.ff(actor_input)
+
+        return self.ff(actor_input).tanh() * 5.
 
 class Critic(Module):
     def __init__(self, **kwargs):
@@ -112,7 +113,8 @@ class Agent(Module):
         lam,
         discount_factor,
         ema_decay,
-        flow_loss_weight = 1.
+        flow_loss_weight = 1.,
+        noise_std_dev = 2.
     ):
         super().__init__()
 
@@ -128,6 +130,7 @@ class Agent(Module):
             self.actor,
             data_shape = (num_actions,),
             accept_cond = True,
+            noise_std_dev = noise_std_dev
         )
 
         self.critic = Critic(
@@ -194,7 +197,7 @@ class Agent(Module):
 
                 # learn mean flow actor
 
-                noise = torch.randn_like(actions)
+                noise = torch.randn_like(actions) * self.mean_flow_actor.noise_std_dev
 
                 # flow loss
 
@@ -208,7 +211,7 @@ class Agent(Module):
 
                 sampled_actions = self.mean_flow_actor.sample(cond = states, noise = noise, requires_grad = True) # 1-step sample from mean flow paper, no more issue
 
-                q_value = self.ema_critic(states, sampled_actions.clamp(-1., 1.))
+                q_value = self.ema_critic(states, sampled_actions)
 
                 # total actor loss
 

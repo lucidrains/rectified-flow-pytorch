@@ -37,7 +37,8 @@ class MeanFlow(Module):
         prob_default_flow_obj = 0.5,
         add_recon_loss = False,
         recon_loss_weight = 1.,
-        accept_cond = False
+        accept_cond = False,
+        noise_std_dev = 1.
     ):
         super().__init__()
         self.model = model # model must accept three arguments in the order of (<noised data>, <times>, <integral start times>, <maybe condition?>)
@@ -60,6 +61,8 @@ class MeanFlow(Module):
         # accepting conditioning
 
         self.accept_cond = accept_cond
+
+        self.noise_std_dev = noise_std_dev
 
     def sample(
         self,
@@ -90,7 +93,7 @@ class MeanFlow(Module):
         # Algorithm 2
 
         if not exists(noise):
-            noise = torch.randn((batch_size, *data_shape), device = device)
+            noise = torch.randn((batch_size, *data_shape), device = device) * self.noise_std_dev
 
         with context():
             denoised = noise - self.model(noise, ones(batch_size, device = device), zeros(batch_size, device = device), *maybe_cond)
@@ -133,7 +136,7 @@ class MeanFlow(Module):
         # derive flows
 
         if not exists(noise):
-            noise = torch.randn_like(data)
+            noise = torch.randn_like(data) * self.noise_std_dev
 
         flow = noise - data # flow is the velocity from data to noise, also what the model is trained to predict
 
