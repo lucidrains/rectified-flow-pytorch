@@ -24,7 +24,7 @@ from torch.utils.data import TensorDataset, DataLoader
 
 import gymnasium as gym
 
-from einops import rearrange, repeat, reduce, pack
+from einops import rearrange, repeat, reduce, einsum, pack
 
 from ema_pytorch import EMA
 
@@ -87,8 +87,14 @@ class Critic(Module):
 
     def forward(self, states, actions):
         states_actions = cat((states, actions), dim = -1)
-        q_value = self.ff(states_actions)
-        return reduce(q_value, '... groups 1 -> ...', 'min') # treating overestimation bias
+        q_values = self.ff(states_actions)
+        q_values = rearrange(q_values, '... 1 -> ...')
+
+        # treating overestimation bias w/ dual critic trick
+        softmin = (-q_values * 1e1).softmax(dim = -1)
+        q_values = einsum(q_values, softmin, '... g, ... g -> ...')
+
+        return q_values
 
 class Agent(Module):
     def __init__(
@@ -121,7 +127,6 @@ class Agent(Module):
             self.actor,
             data_shape = (num_actions,),
             accept_cond = True,
-            add_recon_loss = True
         )
 
         self.critic = Critic(
@@ -193,6 +198,10 @@ class Agent(Module):
                 # flow loss
 
                 flow_loss = self.mean_flow_actor(actions, cond = states, noise = noise)
+                flow_loss.backward()
+
+                self.opt_actor.step()
+                self.opt_actor.zero_grad()
 
                 # actor learning to maximize q value
 
@@ -202,7 +211,7 @@ class Agent(Module):
 
                 # total actor loss
 
-                actor_loss = -q_value.mean() + flow_loss * self.flow_loss_weight
+                actor_loss = -q_value.mean()
                 actor_loss.backward()
 
                 self.opt_actor.step()
@@ -293,9 +302,7 @@ def main(
                     actions = agent.mean_flow_actor.sample(cond = state_with_one_batch)
                     actions = rearrange(actions, '1 ... -> ...')
 
-            actions.clamp_(-1., 1.)
-
-            next_state, reward, terminated, truncated, _ = env.step(actions.tolist())
+            next_state, reward, terminated, truncated, _ = env.step(actions.clamp_(-1., 1.).tolist())
 
             reward /= max_reward
 
