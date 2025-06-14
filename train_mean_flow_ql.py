@@ -10,7 +10,7 @@ from pathlib import Path
 from shutil import rmtree
 from functools import partial
 from collections import namedtuple
-from random import randrange
+from random import randrange, random
 
 import numpy as np
 from tqdm import tqdm
@@ -24,11 +24,12 @@ from torch.utils.data import TensorDataset, DataLoader
 
 import gymnasium as gym
 
-from einops import rearrange, repeat, pack
+from einops import rearrange, repeat, reduce, pack
 
 from ema_pytorch import EMA
 
-from x_mlps_pytorch import MLP
+from x_mlps_pytorch import Feedforwards
+from x_mlps_pytorch.grouped_ff import GroupedFeedforwards
 
 from rectified_flow_pytorch.mean_flow import MeanFlow
 
@@ -60,9 +61,9 @@ def divisible_by(num, den):
 # agent
 
 class Actor(Module):
-    def __init__(self, *dims):
+    def __init__(self, **kwargs):
         super().__init__()
-        self.denoiser_mlp = MLP(*dims)
+        self.ff = Feedforwards(**kwargs)
 
     def forward(
         self,
@@ -73,22 +74,21 @@ class Actor(Module):
     ):
         noise_and_cond = cat((noised_data, states), dim = -1)
 
-        if noise_and_cond.ndim == 2:
-            times = rearrange(times, 'b -> b 1')
-            integral_start_times = rearrange(integral_start_times, 'b -> b 1')
+        times = rearrange(times, 'b -> b 1')
+        integral_start_times = rearrange(integral_start_times, 'b -> b 1')
 
         actor_input = cat((noise_and_cond, times, integral_start_times), dim = -1)
-        return self.denoiser_mlp(actor_input)
+        return self.ff(actor_input)
 
 class Critic(Module):
-    def __init__(self, *dims):
+    def __init__(self, **kwargs):
         super().__init__()
-        self.mlp = MLP(*dims)
+        self.ff = GroupedFeedforwards(**kwargs, groups = 2)
 
     def forward(self, states, actions):
         states_actions = cat((states, actions), dim = -1)
-        q_value = self.mlp(states_actions)
-        return rearrange(q_value, '... 1 -> ...')
+        q_value = self.ff(states_actions)
+        return reduce(q_value, '... groups 1 -> ...', 'min') # treating overestimation bias
 
 class Agent(Module):
     def __init__(
@@ -97,18 +97,25 @@ class Agent(Module):
         num_actions,
         actor_hidden_dim,
         critic_hidden_dim,
-        reward_range: tuple[float, float],
         epochs,
         batch_size,
         lr,
+        weight_decay,
         betas,
         lam,
         discount_factor,
         ema_decay,
+        flow_loss_weight = 1.
     ):
         super().__init__()
 
-        self.actor = Actor(state_dim + num_actions + 2, actor_hidden_dim, num_actions) # naively concat time and integral start time -> mlp
+        self.actor = Actor(
+            dim = actor_hidden_dim,
+            dim_in = state_dim + num_actions + 2,
+            depth = 3,
+            dim_out = num_actions,
+            final_norm = True
+        ) # naively concat time and integral start time -> mlp
 
         self.mean_flow_actor = MeanFlow(
             self.actor,
@@ -116,12 +123,17 @@ class Agent(Module):
             accept_cond = True
         )
 
-        self.critic = Critic(state_dim + num_actions, critic_hidden_dim, 1)
+        self.critic = Critic(
+            dim = critic_hidden_dim,
+            depth = 3,
+            dim_in = state_dim + num_actions,
+            dim_out = 1
+        )
 
         self.ema_critic = EMA(self.critic, beta = ema_decay, include_online_model = False)
 
-        self.opt_actor = Adam(self.actor.parameters(), lr = lr, betas = betas)
-        self.opt_critic = Adam(self.critic.parameters(), lr = lr, betas = betas)
+        self.opt_actor = Adam(self.actor.parameters(), lr = lr, weight_decay = weight_decay, betas = betas)
+        self.opt_critic = Adam(self.critic.parameters(), lr = lr, weight_decay = weight_decay, betas = betas)
 
         self.ema_critic.add_to_optimizer_post_step_hook(self.opt_critic)
 
@@ -133,31 +145,21 @@ class Agent(Module):
 
         self.discount_factor = discount_factor
 
+        self.flow_loss_weight = flow_loss_weight
+
     def learn(self, memories):
 
         # retrieve and prepare data from memory for training
 
-        (
-            states,
-            actions,
-            rewards,
-            next_states,
-            dones,
-        ) = zip(*memories)
+        data = zip(*memories)
 
         # convert values to torch tensors
 
         to_torch_tensor = lambda t: stack(t).to(device).detach()
 
-        states = to_torch_tensor(states)
-        next_states = to_torch_tensor(next_states)
-        rewards = to_torch_tensor(rewards)
-        actions = to_torch_tensor(actions)
-        dones = to_torch_tensor(dones)
+        data = map(to_torch_tensor, data)
 
         # prepare dataloader for policy phase training
-
-        data = (states, actions, rewards, dones, next_states)
 
         dataset = TensorDataset(*data)
 
@@ -166,11 +168,11 @@ class Agent(Module):
         # updating actor / critic
 
         for _ in range(self.epochs):
-            for states, actions, rewards, terminal, next_states in dl:
+            for states, actions, rewards, next_states, terminal in dl:
 
                 # the flow q-learning proposed here https://seohong.me/projects/fql/ is now simplified
 
-                next_actions = self.mean_flow_actor.sample(cond = next_states)
+                next_actions = self.mean_flow_actor.sample(cond = next_states).clamp(-1., 1.)
 
                 # learn critic
 
@@ -185,19 +187,22 @@ class Agent(Module):
 
                 # learn mean flow actor
 
-                flow_loss = self.mean_flow_actor(actions, cond = states)
+                noise = torch.randn_like(actions)
 
-                sampled_actions = self.mean_flow_actor.sample(cond = states, requires_grad = True) # 1-step sample from mean flow paper, no more issue
+                flow_loss = self.mean_flow_actor(actions, cond = states, noise = noise)
+
+                sampled_actions = self.mean_flow_actor.sample(cond = states, noise = noise, requires_grad = True) # 1-step sample from mean flow paper, no more issue
 
                 with torch.no_grad():
-                    q_value = self.critic(states, sampled_actions)
+                    q_value = self.ema_critic(states, sampled_actions.clamp(-1., 1.))
 
-                actor_loss = -q_value.mean() + flow_loss
+                actor_loss = -q_value.mean() + flow_loss * self.flow_loss_weight
                 actor_loss.backward()
 
                 self.opt_actor.step()
                 self.opt_actor.zero_grad()
 
+                print(f'critic: {critic_loss.item():.3f} | actor flow: {flow_loss.item():.3f} | actor q value: {q_value.mean().item():.3f}')
 # main
 
 def main(
@@ -206,15 +211,17 @@ def main(
     max_timesteps = 500,
     actor_hidden_dim = 64,
     critic_hidden_dim = 256,
-    reward_range = (-100, 100),
+    max_reward = 100,
     batch_size = 64,
-    lr = 0.0008,
+    prob_rand_action = 0.1,
+    lr = 0.002,
+    weight_decay = 1e-3,
     betas = (0.9, 0.99),
     lam = 0.95,
     discount_factor = 0.99,
-    ema_decay = 0.9,
+    ema_decay = 0.95,
     update_timesteps = 5000,
-    epochs = 2,
+    epochs = 5,
     render = True,
     render_every_eps = 250,
     clear_videos = True,
@@ -248,10 +255,10 @@ def main(
         num_actions,
         actor_hidden_dim,
         critic_hidden_dim,
-        reward_range,
         epochs,
         batch_size,
         lr,
+        weight_decay,
         betas,
         lam,
         discount_factor,
@@ -269,12 +276,19 @@ def main(
         for timestep in range(max_timesteps):
             time += 1
 
-            with torch.no_grad():
-                state_with_one_batch = rearrange(state, 'd -> 1 d')
-                actions = agent.mean_flow_actor.sample(cond = state_with_one_batch)
-                actions = rearrange(actions, '1 ... -> ...')
+            if prob_rand_action < random():
+                actions = torch.rand((num_actions,), device = device) * 2 - 1.
+            else:
+                with torch.no_grad():
+                    state_with_one_batch = rearrange(state, 'd -> 1 d')
+                    actions = agent.mean_flow_actor.sample(cond = state_with_one_batch)
+                    actions = rearrange(actions, '1 ... -> ...')
+
+            actions.clamp_(-1., 1.)
 
             next_state, reward, terminated, truncated, _ = env.step(actions.tolist())
+
+            reward /= max_reward
 
             next_state = torch.from_numpy(next_state).to(device)
 

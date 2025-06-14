@@ -66,7 +66,8 @@ class MeanFlow(Module):
         batch_size = None,
         data_shape = None,
         requires_grad = False,
-        cond = None
+        cond = None,
+        noise = None
     ):
         assert xnor(self.accept_cond, exists(cond))
 
@@ -88,9 +89,10 @@ class MeanFlow(Module):
 
         # Algorithm 2
 
-        with context():
+        if not exists(noise):
             noise = torch.randn((batch_size, *data_shape), device = device)
 
+        with context():
             denoised = noise - self.model(noise, ones(batch_size, device = device), zeros(batch_size, device = device), *maybe_cond)
 
         return self.unnormalize_data_fn(denoised)
@@ -99,7 +101,8 @@ class MeanFlow(Module):
         self,
         data,
         return_loss_breakdown = False,
-        cond = None
+        cond = None,
+        noise = None
     ):
         assert xnor(self.accept_cond, exists(cond))
 
@@ -129,7 +132,9 @@ class MeanFlow(Module):
 
         # derive flows
 
-        noise = torch.randn_like(data)
+        if not exists(noise):
+            noise = torch.randn_like(data)
+
         flow = noise - data # flow is the velocity from data to noise, also what the model is trained to predict
 
         padded_times, padded_start_times = tuple(append_dims(t, ndim - 1) for t in (times, integral_start_times))
