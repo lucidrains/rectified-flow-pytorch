@@ -21,9 +21,11 @@ def test_nano_flow():
 
 @pytest.mark.parametrize('add_recon_loss', (False, True))
 @pytest.mark.parametrize('accept_cond', (False, True))
+@pytest.mark.parametrize('use_adaptive_loss_weight', (False, True))
 def test_mean_flow(
     add_recon_loss,
-    accept_cond
+    accept_cond,
+    use_adaptive_loss_weight
 ):
 
     from einx import add
@@ -39,7 +41,7 @@ def test_mean_flow(
 
     model = Unet()
 
-    mean_flow = MeanFlow(model, add_recon_loss = add_recon_loss, accept_cond = accept_cond)
+    mean_flow = MeanFlow(model, add_recon_loss = add_recon_loss, accept_cond = accept_cond, use_adaptive_loss_weight = use_adaptive_loss_weight)
     data = torch.randn(16, 3, 16, 16)
     cond = data.clone() if accept_cond else None
 

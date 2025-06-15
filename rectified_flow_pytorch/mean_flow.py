@@ -35,7 +35,7 @@ class MeanFlow(Module):
         data_shape = None,
         normalize_data_fn = identity,
         unnormalize_data_fn = identity,
-        use_adapted_loss_weight = True,
+        use_adaptive_loss_weight = True,
         adaptive_loss_weight_p = 0.5, # 0.5 is approximately pseudo huber loss
         prob_default_flow_obj = 0.5,
         add_recon_loss = False,
@@ -48,7 +48,7 @@ class MeanFlow(Module):
         self.model = model # model must accept three arguments in the order of (<noised data>, <times>, <integral start times>, <maybe condition?>)
         self.data_shape = data_shape
 
-        self.use_adapted_loss_weight = use_adapted_loss_weight
+        self.use_adaptive_loss_weight = use_adaptive_loss_weight
         self.adaptive_loss_weight_p = adaptive_loss_weight_p
         self.eps = eps
 
@@ -167,6 +167,8 @@ class MeanFlow(Module):
         if normal_flow_match_obj:
             # Normal flow matching without jvp 25-50% of the time
 
+            delta_times.zero_()
+
             pred, rate_avg_vel_change = (
                 self.model(*inputs),
                 tensor(0., device = device)
@@ -190,7 +192,7 @@ class MeanFlow(Module):
 
         # section 4.3
 
-        if self.use_adapted_loss_weight:
+        if self.use_adaptive_loss_weight:
             flow_loss = reduce(flow_loss, 'b ... -> b', 'mean')
 
             p = self.adaptive_loss_weight_p
