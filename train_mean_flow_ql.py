@@ -1,6 +1,6 @@
 
 # along same veins as https://arxiv.org/abs/2502.02538
-# but no more distillation, BC, and all that
+# but no more distillation and all that
 # before you email me, just go ahead and write the paper, no cites needed if it works
 
 from __future__ import annotations
@@ -94,10 +94,7 @@ class Critic(Module):
 
         # treating overestimation bias w/ N critics trick
 
-        softmin = (-q_values * 1e1).softmax(dim = -1)
-        softmin_q_value = einsum(q_values, softmin, '... g, ... g -> ...')
-
-        return softmin_q_value
+        return reduce(q_values, '... g -> ...', 'min').sigmoid()
 
 class Agent(Module):
     def __init__(
@@ -114,7 +111,7 @@ class Agent(Module):
         lam,
         discount_factor,
         ema_decay,
-        flow_loss_weight = 1.,
+        flow_loss_weight = 0.1,
         noise_std_dev = 2.
     ):
         super().__init__()
@@ -205,10 +202,6 @@ class Agent(Module):
                 # flow loss
 
                 flow_loss = self.mean_flow_actor(actions, cond = states, noise = noise)
-                flow_loss.backward()
-
-                self.opt_actor.step()
-                self.opt_actor.zero_grad()
 
                 # actor learning to maximize q value
 
@@ -218,7 +211,7 @@ class Agent(Module):
 
                 # total actor loss
 
-                actor_loss = -q_value.mean()
+                actor_loss = -(q_value.square() * q_value.sign()).mean() + (flow_loss * self.flow_loss_weight)
                 actor_loss.backward()
 
                 self.opt_actor.step()
