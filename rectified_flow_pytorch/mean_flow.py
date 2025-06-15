@@ -160,14 +160,16 @@ class MeanFlow(Module):
         inputs = (noised_data, times, delta_times)
         tangents = (flow, ones(batch, device = device), ones(batch, device = device))
 
-        if self.accept_cond:
-            inputs = (*inputs, cond)
-            tangents = (*tangents, cond)
+        def cond_forward(cond):
+            def inner(*inputs):
+                return self.model(*inputs, cond)
+            return inner
 
         if normal_flow_match_obj:
             # Normal flow matching without jvp 25-50% of the time
 
-            delta_times.zero_()
+            if self.accept_cond:
+                inputs = (*inputs, cond)
 
             pred, rate_avg_vel_change = (
                 self.model(*inputs),
@@ -177,7 +179,7 @@ class MeanFlow(Module):
             # Algorithm 1
 
             pred, rate_avg_vel_change = jvp(
-                self.model,
+                self.model if not self.accept_cond else cond_forward(cond),
                 inputs,
                 tangents
             )

@@ -8,6 +8,7 @@ from __future__ import annotations
 import fire
 from pathlib import Path
 from shutil import rmtree
+from copy import deepcopy
 from functools import partial
 from collections import namedtuple
 from random import randrange, random
@@ -84,7 +85,7 @@ class Actor(Module):
 class Critic(Module):
     def __init__(self, **kwargs):
         super().__init__()
-        self.ff = GroupedFeedforwards(**kwargs, groups = 3)
+        self.ff = GroupedFeedforwards(**kwargs, groups = 2)
 
     def forward(self, states, actions):
         states_actions = cat((states, actions), dim = -1)
@@ -177,17 +178,19 @@ class Agent(Module):
 
         # updating actor / critic
 
+        ema_critic_copy = deepcopy(self.ema_critic)
+
         with tqdm(range(self.epochs)) as pbar:
             for states, actions, rewards, next_states, terminal in dl:
 
                 # the flow q-learning proposed here https://seohong.me/projects/fql/ is now simplified
 
-                next_actions = self.mean_flow_actor.sample(cond = next_states).clamp(-1., 1.)
+                next_actions = self.mean_flow_actor.sample(cond = next_states)
 
                 # learn critic
 
                 pred_q = self.critic(states, actions)
-                target_q = rewards.float() + (~terminal).float() * self.discount_factor * self.ema_critic(next_states, next_actions)
+                target_q = rewards.float() + (~terminal).float() * self.discount_factor * ema_critic_copy(next_states, next_actions)
 
                 critic_loss = F.mse_loss(pred_q, target_q)
                 critic_loss.backward()
