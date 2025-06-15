@@ -9,6 +9,8 @@ from torch.nn import Module
 import torch.nn.functional as F
 from torch.func import jvp
 
+from einops import reduce
+
 def exists(v):
     return v is not None
 
@@ -33,18 +35,23 @@ class MeanFlow(Module):
         data_shape = None,
         normalize_data_fn = identity,
         unnormalize_data_fn = identity,
-        use_huber_loss = True,
+        use_adapted_loss_weight = True,
+        adaptive_loss_weight_p = 0.5, # 0.5 is approximately pseudo huber loss
         prob_default_flow_obj = 0.5,
         add_recon_loss = False,
         recon_loss_weight = 1.,
         accept_cond = False,
-        noise_std_dev = 1.
+        noise_std_dev = 1.,
+        eps = 1e-3
     ):
         super().__init__()
         self.model = model # model must accept three arguments in the order of (<noised data>, <times>, <integral start times>, <maybe condition?>)
         self.data_shape = data_shape
 
-        self.use_huber_loss = use_huber_loss
+        self.use_adapted_loss_weight = use_adapted_loss_weight
+        self.adaptive_loss_weight_p = adaptive_loss_weight_p
+        self.eps = eps
+
         self.normalize_data_fn = normalize_data_fn
         self.unnormalize_data_fn = unnormalize_data_fn
 
@@ -96,7 +103,7 @@ class MeanFlow(Module):
             noise = torch.randn((batch_size, *data_shape), device = device) * self.noise_std_dev
 
         with context():
-            denoised = noise - self.model(noise, ones(batch_size, device = device), zeros(batch_size, device = device), *maybe_cond)
+            denoised = noise - self.model(noise, ones(batch_size, device = device), ones(batch_size, device = device), *maybe_cond)
 
         return self.unnormalize_data_fn(denoised)
 
@@ -140,13 +147,18 @@ class MeanFlow(Module):
 
         flow = noise - data # flow is the velocity from data to noise, also what the model is trained to predict
 
-        padded_times, padded_start_times = tuple(append_dims(t, ndim - 1) for t in (times, integral_start_times))
+        padded_times = append_dims(times, ndim - 1)
         noised_data = data.lerp(noise, padded_times) # noise the data with random amounts of noise (time) - from data -> noise from 0. to 1.
+
+        # they condition the network on the delta time instead
+
+        delta_times = times - integral_start_times
+        padded_delta_times = append_dims(delta_times, ndim - 1)
 
         # model forward with maybe jvp
 
-        inputs = (noised_data, times, integral_start_times)
-        tangents = (flow, ones(batch, device = device), zeros(batch, device = device))
+        inputs = (noised_data, times, delta_times)
+        tangents = (flow, ones(batch, device = device), ones(batch, device = device))
 
         if self.accept_cond:
             inputs = (*inputs, cond)
@@ -170,13 +182,23 @@ class MeanFlow(Module):
 
         # the new proposed target
 
-        integral = (padded_times - padded_start_times) * rate_avg_vel_change.detach()
+        integral = padded_delta_times * rate_avg_vel_change.detach()
 
         target = flow - integral
 
-        loss_fn = F.mse_loss if not self.use_huber_loss else F.huber_loss
+        flow_loss = F.mse_loss(pred, target, reduction = 'none')
 
-        flow_loss = loss_fn(pred, target)
+        # section 4.3
+
+        if self.use_adapted_loss_weight:
+            flow_loss = reduce(flow_loss, 'b ... -> b', 'mean')
+
+            p = self.adaptive_loss_weight_p
+            loss_weight = 1. / (flow_loss + self.eps).pow(p)
+
+            flow_loss = flow_loss * loss_weight.detach()
+
+        flow_loss = flow_loss.mean()
 
         if not self.add_recon_loss:
             if not return_loss_breakdown:
@@ -187,7 +209,7 @@ class MeanFlow(Module):
         # add predicted data recon loss, maybe adds stability, not sure
 
         pred_data = noised_data - (pred + integral) * padded_times
-        recon_loss = loss_fn(pred_data, data)
+        recon_loss = F.mse_loss(pred_data, data)
 
         total_loss = (
             flow_loss +
