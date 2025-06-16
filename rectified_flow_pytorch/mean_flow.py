@@ -90,6 +90,16 @@ class MeanFlow(Module):
     def device(self):
         return self.dummy.device
 
+    def sample_times(self, batch):
+        shape, device = (batch,), self.device
+
+        if not self.use_logit_normal_sampler:
+            return torch.rand(shape, device = device)
+
+        mean = torch.full(shape, self.logit_normal_mean, device = device)
+        std = torch.full(shape, self.logit_normal_std, device = device)
+        return torch.normal(mean, std).sigmoid()
+
     @torch.no_grad()
     def slow_sample(
         self,
@@ -172,16 +182,6 @@ class MeanFlow(Module):
             denoised = noise - self.model(noise, ones(batch_size, device = device), ones(batch_size, device = device), *maybe_cond)
 
         return self.unnormalize_data_fn(denoised)
-
-    def sample_times(self, batch):
-        shape, device = (batch,), self.device
-
-        if not self.use_logit_normal_sampler:
-            return torch.randn(shape, device = device)
-
-        mean = torch.full(shape, self.logit_normal_mean, device = device)
-        std = torch.full(shape, self.logit_normal_std, device = device)
-        return torch.normal(mean, std).sigmoid()
 
     def forward(
         self,
