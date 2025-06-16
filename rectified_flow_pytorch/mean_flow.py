@@ -37,6 +37,9 @@ class MeanFlow(Module):
         unnormalize_data_fn = identity,
         use_adaptive_loss_weight = True,
         adaptive_loss_weight_p = 0.5, # 0.5 is approximately pseudo huber loss
+        use_logit_normal_sampler = True,
+        logit_normal_mean = -.4,
+        logit_normal_std = 1.,
         prob_default_flow_obj = 0.5,
         add_recon_loss = False,
         recon_loss_weight = 1.,
@@ -48,9 +51,19 @@ class MeanFlow(Module):
         self.model = model # model must accept three arguments in the order of (<noised data>, <times>, <integral start times>, <maybe condition?>)
         self.data_shape = data_shape
 
+        # weight loss related
+
         self.use_adaptive_loss_weight = use_adaptive_loss_weight
         self.adaptive_loss_weight_p = adaptive_loss_weight_p
         self.eps = eps
+
+        # time sampler
+
+        self.use_logit_normal_sampler = use_logit_normal_sampler
+        self.logit_normal_mean = logit_normal_mean
+        self.logit_normal_std = logit_normal_std
+
+        # norm / unnorm data
 
         self.normalize_data_fn = normalize_data_fn
         self.unnormalize_data_fn = unnormalize_data_fn
@@ -70,6 +83,12 @@ class MeanFlow(Module):
         self.accept_cond = accept_cond
 
         self.noise_std_dev = noise_std_dev
+
+        self.register_buffer('dummy', tensor(0), persistent = False)
+
+    @property
+    def device(self):
+        return self.dummy.device
 
     def sample(
         self,
@@ -107,6 +126,16 @@ class MeanFlow(Module):
 
         return self.unnormalize_data_fn(denoised)
 
+    def sample_times(self, batch):
+        shape, device = (batch,), self.device
+
+        if not self.use_logit_normal_sampler:
+            return torch.randn(shape, device = device)
+
+        mean = torch.full(shape, self.logit_normal_mean, device = device)
+        std = torch.full(shape, self.logit_normal_std, device = device)
+        return torch.normal(mean, std).sigmoid()
+
     def forward(
         self,
         data,
@@ -129,7 +158,7 @@ class MeanFlow(Module):
 
         # flow logic
 
-        times = torch.rand(batch, device = device)
+        times = self.sample_times(batch)
 
         # some set prob of the time, normal flow matching training (times == start integral times)
 
@@ -138,7 +167,7 @@ class MeanFlow(Module):
         if normal_flow_match_obj:
             integral_start_times = times
         else:
-            integral_start_times = torch.rand(batch, device = device) * times # restrict range to [0, times]
+            integral_start_times = self.sample_times(batch) * times # restrict range to [0, times]
 
         # derive flows
 
