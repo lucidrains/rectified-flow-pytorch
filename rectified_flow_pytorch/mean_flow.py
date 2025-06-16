@@ -90,21 +90,51 @@ class MeanFlow(Module):
     def device(self):
         return self.dummy.device
 
+    @torch.no_grad()
+    def slow_sample(
+        self,
+        steps = 16,
+        batch_size = 1,
+        cond = None,
+        data_shape = None,
+        **kwargs
+    ):
+        assert steps >= 1
+
+        data_shape = default(data_shape, self.data_shape)
+        assert exists(data_shape), 'shape of the data must be passed in, or set at init or during training'
+        device = self.device
+
+        noise = torch.randn((batch_size, *data_shape), device = device)
+
+        times = torch.linspace(1., 0., steps + 1, device = device)[:-1]
+        delta = 1. / steps
+
+        denoised = noise
+
+        maybe_cond = (cond,) if self.accept_cond else ()
+
+        delta_time = zeros(batch_size, device = device)
+
+        for time in times:
+            time = time.expand(batch_size)
+            pred_flow = self.model(denoised, time, delta_time, *maybe_cond)
+            denoised = denoised - delta * pred_flow
+
+        return self.unnormalize_data_fn(denoised)
+
     def sample(
         self,
         batch_size = None,
         data_shape = None,
         requires_grad = False,
         cond = None,
-        noise = None
+        noise = None,
+        steps = 1
     ):
-        assert xnor(self.accept_cond, exists(cond))
-
         data_shape = default(data_shape, self.data_shape)
-        assert exists(data_shape), 'shape of the data must be passed in, or set at init or during training'
-        device = next(self.model.parameters()).device
 
-        context = nullcontext if requires_grad else torch.no_grad
+        assert exists(data_shape), 'shape of the data must be passed in, or set at init or during training'
 
         # maybe condition
 
@@ -115,6 +145,23 @@ class MeanFlow(Module):
             maybe_cond = (cond,)
 
         batch_size = default(batch_size, 1)
+
+        # maybe slow sample
+
+        assert steps >= 1
+
+        if steps > 1:
+            return self.slow_sample(
+                batch_size = batch_size,
+                data_shape = data_shape,
+                cond = cond,
+                steps = steps
+            )
+
+        assert xnor(self.accept_cond, exists(cond))
+        device = next(self.model.parameters()).device
+
+        context = nullcontext if requires_grad else torch.no_grad
 
         # Algorithm 2
 

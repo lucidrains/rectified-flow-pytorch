@@ -2,6 +2,7 @@
 # along same veins as https://arxiv.org/abs/2502.02538
 # but no more distillation and all that
 # before you email me, just go ahead and write the paper, no cites needed if it works
+# https://seohong.me/blog/q-learning-is-not-yet-scalable/
 
 from __future__ import annotations
 
@@ -80,7 +81,7 @@ class Actor(Module):
 
         actor_input = cat((noise_and_cond, times, integral_start_times), dim = -1)
 
-        return self.ff(actor_input).tanh() * 5.
+        return self.ff(actor_input)
 
 class Critic(Module):
     def __init__(self, **kwargs):
@@ -111,15 +112,16 @@ class Agent(Module):
         lam,
         discount_factor,
         ema_decay,
-        flow_loss_weight = 0.1,
-        noise_std_dev = 2.
+        flow_loss_weight = 0.25,
+        noise_std_dev = 2.,
+        update_critic_with_ema_every = 100_000
     ):
         super().__init__()
 
         self.actor = Actor(
             dim = actor_hidden_dim,
             dim_in = state_dim + num_actions + 2,
-            depth = 3,
+            depth = 2,
             dim_out = num_actions,
             final_norm = True
         ) # naively concat time and integral start time -> mlp
@@ -133,12 +135,12 @@ class Agent(Module):
 
         self.critic = Critic(
             dim = critic_hidden_dim,
-            depth = 3,
+            depth = 2,
             dim_in = state_dim + num_actions,
             dim_out = 1
         )
 
-        self.ema_critic = EMA(self.critic, beta = ema_decay, include_online_model = False)
+        self.ema_critic = EMA(self.critic, beta = ema_decay, include_online_model = False, update_model_with_ema_every = update_critic_with_ema_every)
 
         self.opt_actor = Adam(self.actor.parameters(), lr = lr, weight_decay = weight_decay, betas = betas)
         self.opt_critic = Adam(self.critic.parameters(), lr = lr, weight_decay = weight_decay, betas = betas)
@@ -180,6 +182,8 @@ class Agent(Module):
         with tqdm(range(self.epochs)) as pbar:
             for states, actions, rewards, next_states, terminal in dl:
 
+                self.opt_critic.zero_grad()
+
                 # the flow q-learning proposed here https://seohong.me/projects/fql/ is now simplified
 
                 next_actions = self.mean_flow_actor.sample(cond = next_states)
@@ -193,7 +197,13 @@ class Agent(Module):
                 critic_loss.backward()
 
                 self.opt_critic.step()
-                self.opt_critic.zero_grad()
+
+                pbar.set_description(f'critic: {critic_loss.item():.3f}')
+
+                pbar.update(1)
+
+        with tqdm(range(self.epochs)) as pbar:
+            for states, actions, rewards, next_states, terminal in dl:
 
                 # learn mean flow actor
 
@@ -217,9 +227,9 @@ class Agent(Module):
                 self.opt_actor.step()
                 self.opt_actor.zero_grad()
 
-                pbar.set_description(f'critic: {critic_loss.item():.3f} | actor flow: {flow_loss.item():.3f} | actor q value: {q_value.mean().item():.3f}')
+                pbar.set_description(f'actor flow: {flow_loss.item():.3f} | actor q value: {q_value.mean().item():.3f}')
 
-        pbar.update(1)
+                pbar.update(1)
 
 # main
 
@@ -228,11 +238,11 @@ def main(
     num_episodes = 50000,
     max_timesteps = 500,
     actor_hidden_dim = 64,
-    critic_hidden_dim = 256,
+    critic_hidden_dim = 128,
     max_reward = 100,
     batch_size = 64,
     prob_rand_action = 0.1,
-    lr = 0.002,
+    lr = 0.0008,
     weight_decay = 1e-3,
     betas = (0.9, 0.99),
     lam = 0.95,
@@ -240,6 +250,7 @@ def main(
     ema_decay = 0.95,
     update_timesteps = 10000,
     epochs = 5,
+    actor_sample_steps_at_rollout = 4,
     render = True,
     render_every_eps = 250,
     clear_videos = True,
@@ -299,10 +310,11 @@ def main(
             else:
                 with torch.no_grad():
                     state_with_one_batch = rearrange(state, 'd -> 1 d')
-                    actions = agent.mean_flow_actor.sample(cond = state_with_one_batch)
+                    actions = agent.mean_flow_actor.sample(cond = state_with_one_batch, steps = actor_sample_steps_at_rollout)
                     actions = rearrange(actions, '1 ... -> ...')
 
-            next_state, reward, terminated, truncated, _ = env.step(actions.clamp_(-1., 1.).tolist())
+            actions.clamp_(-1., 1.)
+            next_state, reward, terminated, truncated, _ = env.step(actions.tolist())
 
             reward /= max_reward
 
