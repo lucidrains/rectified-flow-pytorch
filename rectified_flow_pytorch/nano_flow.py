@@ -63,7 +63,7 @@ class NanoFlow(Module):
 
         return self.unnormalize_data_fn(denoised)
 
-    def forward(self, data, **kwargs):
+    def forward(self, data, noise = None, **kwargs):
         data = self.normalize_data_fn(data)
 
         # shapes and variables
@@ -75,7 +75,7 @@ class NanoFlow(Module):
         # flow logic
 
         times = torch.rand(batch, device = device)
-        noise = torch.randn_like(data)
+        noise = default(noise, torch.randn_like(data))
         flow = data - noise # flow is the velocity from noise to data, also what the model is trained to predict
 
         padded_times = append_dims(times, ndim - 1)
