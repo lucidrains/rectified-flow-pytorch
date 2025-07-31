@@ -63,12 +63,12 @@ class NanoFlow(Module):
 
         return self.unnormalize_data_fn(denoised)
 
-    def forward(self, data, noise = None, **kwargs):
+    def forward(self, data, noise = None, loss_weights = None, **kwargs):
         data = self.normalize_data_fn(data)
 
         # shapes and variables
 
-        shape, ndim = data.shape, data.ndim
+        shape, ndim, has_loss_weight = data.shape, data.ndim, exists(loss_weights)
         self.data_shape = default(self.data_shape, shape[1:]) # store last data shape for inference
         batch, device = shape[0], data.device
 
@@ -84,7 +84,15 @@ class NanoFlow(Module):
         time_kwarg = {self.times_cond_kwarg: times} if exists(self.times_cond_kwarg) else dict() # maybe time conditioning, could work without it (https://arxiv.org/abs/2502.13129v1)
         pred_flow = self.model(noised_data, **time_kwarg, **kwargs)
 
-        return F.mse_loss(flow, pred_flow)
+        loss = F.mse_loss(flow, pred_flow, reduction = 'none' if has_loss_weight else 'mean')
+
+        if not has_loss_weight:
+            return loss
+
+        # loss weighting
+
+        loss_weights = append_dims(loss_weights, ndim - loss_weights.ndim)
+        return (loss * loss_weights).mean()
 
 # quick test
 
