@@ -43,6 +43,7 @@ device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
 Memory = namedtuple('Memory', [
     'state',
+    'noise',
     'action',
     'reward',
     'next_state',
@@ -180,13 +181,13 @@ class Agent(Module):
         ema_critic_copy = deepcopy(self.ema_critic)
 
         with tqdm(range(self.epochs)) as pbar:
-            for states, actions, rewards, next_states, terminal in dl:
+            for states, noise, actions, rewards, next_states, terminal in dl:
 
                 self.opt_critic.zero_grad()
 
                 # the flow q-learning proposed here https://seohong.me/projects/fql/ is now simplified
 
-                next_actions = self.mean_flow_actor.sample(cond = next_states)
+                next_actions = self.mean_flow_actor.sample(noise = noise, cond = next_states)
 
                 # learn critic
 
@@ -203,15 +204,11 @@ class Agent(Module):
                 pbar.update(1)
 
         with tqdm(range(self.epochs)) as pbar:
-            for states, actions, rewards, next_states, terminal in dl:
-
-                # learn mean flow actor
-
-                noise = torch.randn_like(actions) * self.mean_flow_actor.noise_std_dev
+            for states, noise, actions, rewards, next_states, terminal in dl:
 
                 # flow loss
 
-                flow_loss = self.mean_flow_actor(actions, cond = states, noise = noise)
+                flow_loss = self.mean_flow_actor(actions, noise = noise, cond = states)
 
                 # actor learning to maximize q value
 
@@ -305,12 +302,14 @@ def main(
         for timestep in range(max_timesteps):
             time += 1
 
+            noise = agent.mean_flow_actor.get_noise()
+
             if prob_rand_action < random():
                 actions = torch.rand((num_actions,), device = device) * 2 - 1.
             else:
                 with torch.no_grad():
                     state_with_one_batch = rearrange(state, 'd -> 1 d')
-                    actions = agent.mean_flow_actor.sample(cond = state_with_one_batch, steps = actor_sample_steps_at_rollout)
+                    actions = agent.mean_flow_actor.slow_sample(noise = noise, cond = state_with_one_batch, steps = actor_sample_steps_at_rollout)
                     actions = rearrange(actions, '1 ... -> ...')
 
             actions.clamp_(-1., 1.)
@@ -320,7 +319,8 @@ def main(
 
             next_state = torch.from_numpy(next_state).to(device)
 
-            memory = Memory(state, actions, tensor(reward), next_state, tensor(terminated))
+            noise = rearrange(noise, '1 a -> a')
+            memory = Memory(state, noise, actions, tensor(reward), next_state, tensor(terminated))
 
             memories.append(memory)
 

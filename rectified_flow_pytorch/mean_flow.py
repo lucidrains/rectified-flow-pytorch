@@ -100,22 +100,35 @@ class MeanFlow(Module):
         std = torch.full(shape, self.logit_normal_std, device = device)
         return torch.normal(mean, std).sigmoid()
 
+    def get_noise(
+        self,
+        batch_size = 1,
+        data_shape = None
+    ):
+        device = self.device
+
+        data_shape = default(data_shape, self.data_shape)
+        assert exists(data_shape), 'shape of the data must be passed in, or set at init or during training'
+
+        noise = torch.randn((batch_size, *data_shape), device = device) * self.noise_std_dev
+        return noise
+
     @torch.no_grad()
     def slow_sample(
         self,
         steps = 16,
         batch_size = 1,
+        noise = None,
         cond = None,
         data_shape = None,
         **kwargs
     ):
         assert steps >= 1
 
-        data_shape = default(data_shape, self.data_shape)
-        assert exists(data_shape), 'shape of the data must be passed in, or set at init or during training'
         device = self.device
 
-        noise = torch.randn((batch_size, *data_shape), device = device)
+        if not exists(noise):
+            noise = self.get_noise(batch_size, data_shape = data_shape)
 
         times = torch.linspace(1., 0., steps + 1, device = device)[:-1]
         delta = 1. / steps
@@ -176,7 +189,7 @@ class MeanFlow(Module):
         # Algorithm 2
 
         if not exists(noise):
-            noise = torch.randn((batch_size, *data_shape), device = device) * self.noise_std_dev
+            noise = self.get_noise(batch_size, data_shape = data_shape)
 
         with context():
             denoised = noise - self.model(noise, ones(batch_size, device = device), ones(batch_size, device = device), *maybe_cond)
