@@ -39,6 +39,7 @@ class NanoFlow(Module):
         steps = 16,
         batch_size = 1,
         data_shape = None,
+        return_noise = False,
         **kwargs
     ):
         assert steps >= 1
@@ -61,20 +62,25 @@ class NanoFlow(Module):
             pred_flow = self.model(denoised, **time_kwarg, **kwargs)
             denoised = denoised + delta * pred_flow
 
-        return self.unnormalize_data_fn(denoised)
+        out = self.unnormalize_data_fn(denoised)
 
-    def forward(self, data, noise = None, loss_weights = None, **kwargs):
+        if not return_noise:
+            return out
+
+        return out, noise
+
+    def forward(self, data, noise = None, times = None, loss_reduction = 'mean', **kwargs):
         data = self.normalize_data_fn(data)
 
         # shapes and variables
 
-        shape, ndim, has_loss_weight = data.shape, data.ndim, exists(loss_weights)
+        shape, ndim = data.shape, data.ndim
         self.data_shape = default(self.data_shape, shape[1:]) # store last data shape for inference
         batch, device = shape[0], data.device
 
         # flow logic
 
-        times = torch.rand(batch, device = device)
+        times = default(times, torch.rand(batch, device = device))
         noise = default(noise, torch.randn_like(data))
         flow = data - noise # flow is the velocity from noise to data, also what the model is trained to predict
 
@@ -84,15 +90,7 @@ class NanoFlow(Module):
         time_kwarg = {self.times_cond_kwarg: times} if exists(self.times_cond_kwarg) else dict() # maybe time conditioning, could work without it (https://arxiv.org/abs/2502.13129v1)
         pred_flow = self.model(noised_data, **time_kwarg, **kwargs)
 
-        loss = F.mse_loss(flow, pred_flow, reduction = 'none' if has_loss_weight else 'mean')
-
-        if not has_loss_weight:
-            return loss
-
-        # loss weighting
-
-        loss_weights = append_dims(loss_weights, ndim - loss_weights.ndim)
-        return (loss * loss_weights).mean()
+        return F.mse_loss(flow, pred_flow, reduction = loss_reduction)
 
 # quick test
 
