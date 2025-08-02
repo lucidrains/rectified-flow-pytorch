@@ -337,7 +337,6 @@ class PPO(Module):
         actor_hidden_dim,
         critic_hidden_dim,
         critic_pred_num_bins,
-        reward_range: tuple[float, float],
         epochs,
         minibatch_size,
         lr,
@@ -348,7 +347,6 @@ class PPO(Module):
         eps_clip,
         value_clip,
         ema_decay,
-        num_times_sample = 16,
         advantage_offset_constant = 0., # the paper talked about some constant to make it non-negative to fit intuition, and yet in the appendix claimed empirically it made no difference
         ema_kwargs: dict = dict(
             update_model_with_ema_every = 1000
@@ -370,8 +368,7 @@ class PPO(Module):
         # https://arxiv.org/abs/2403.03950
 
         self.critic_hl_gauss_loss = HLGaussLoss(
-            min_value = reward_range[0],
-            max_value = reward_range[1],
+            min_value = -10., max_value = 10.,
             num_bins = critic_pred_num_bins,
             clamp_to_range = True
         )
@@ -557,8 +554,7 @@ def main(
     actor_hidden_dim = 32,
     actor_flow_timesteps = 16,
     critic_hidden_dim = 64,
-    critic_pred_num_bins = 100,
-    reward_range = (-100, 100),
+    critic_pred_num_bins = 250,
     minibatch_size = 64,
     lr = 0.0003,
     betas = (0.9, 0.99),
@@ -608,7 +604,6 @@ def main(
         actor_hidden_dim,
         critic_hidden_dim,
         critic_pred_num_bins,
-        reward_range,
         epochs,
         minibatch_size,
         lr,
