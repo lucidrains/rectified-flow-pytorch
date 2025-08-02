@@ -351,6 +351,7 @@ class PPO(Module):
         ema_kwargs: dict = dict(
             update_model_with_ema_every = 1000
         ),
+        reward_range = (-100., 100.),
         save_path = './fpo.pt'
     ):
         super().__init__()
@@ -368,7 +369,8 @@ class PPO(Module):
         # https://arxiv.org/abs/2403.03950
 
         self.critic_hl_gauss_loss = HLGaussLoss(
-            min_value = -10., max_value = 10.,
+            min_value = reward_range[0],
+            max_value = reward_range[1],
             num_bins = critic_pred_num_bins,
             clamp_to_range = True
         )
@@ -494,9 +496,9 @@ class PPO(Module):
 
                 advantages = normalize(returns - scalar_old_values.detach()) + self.advantage_offset_constant
 
-                surr1 = ratios * advantages
-                surr2 = ratios.clamp(1 - self.eps_clip, 1 + self.eps_clip) * advantages
-                policy_loss = torch.min(surr1, surr2)
+                # SPO - Xie et al. https://arxiv.org/abs/2401.16025v9
+
+                policy_loss = ratios * advantages - (ratios - 1.).square() * advantages.abs() / (2 * self.eps_clip)
 
                 policy_loss = policy_loss.mean()
 
@@ -519,8 +521,8 @@ class PPO(Module):
 
                 clipped_returns = returns.clamp(old_values_lo, old_values_hi)
 
-                clipped_loss = hl_gauss(values, clipped_returns)
-                loss = hl_gauss(values, returns)
+                clipped_loss = hl_gauss(values, clipped_returns, reduction = 'none')
+                loss = hl_gauss(values, returns, reduction = 'none')
 
                 value_loss = torch.where(
                     is_between(scalar_values, returns, old_values_lo) |
