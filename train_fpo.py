@@ -345,7 +345,6 @@ class PPO(Module):
         gamma,
         cautious_factor,
         eps_clip,
-        value_clip,
         ema_decay,
         advantage_offset_constant = 0., # the paper talked about some constant to make it non-negative to fit intuition, and yet in the appendix claimed empirically it made no difference
         ema_kwargs: dict = dict(
@@ -394,7 +393,6 @@ class PPO(Module):
         self.gamma = gamma
 
         self.eps_clip = eps_clip
-        self.value_clip = value_clip
 
         self.advantage_offset_constant = advantage_offset_constant
 
@@ -461,9 +459,6 @@ class PPO(Module):
         old_actor = deepcopy(self.actor)
         old_actor.eval()
 
-        old_critic = deepcopy(self.critic)
-        old_critic.eval()
-
         # prepare dataloader for policy phase training
 
         learnable = tensor(learnable).to(device)
@@ -511,17 +506,7 @@ class PPO(Module):
                 # calculate clipped value loss and update value network separate from policy network
 
                 values = self.critic(states)
-
-                value_loss = hl_gauss(values, returns, reduction = 'none')
-
-                with torch.no_grad():
-                    old_values = old_critic(states)
-                    old_value_loss = hl_gauss(old_values, returns, reduction = 'none')
-
-                ratios = softclamp(old_value_loss.detach() - value_loss).exp()
-
-                critic_loss = ratios - (ratios - 1.).square() / (2 * self.value_clip)
-                critic_loss = -critic_loss.mean()
+                critic_loss = hl_gauss(values, returns).mean()
 
                 critic_loss.backward()
                 self.opt_critic.step()
@@ -553,7 +538,6 @@ def main(
     lam = 0.95,
     gamma = 0.99,
     eps_clip = 0.05,
-    value_clip = 0.4,
     cautious_factor = 0.1,
     ema_decay = 0.9,
     update_timesteps = 2500,
@@ -604,7 +588,6 @@ def main(
         gamma,
         cautious_factor,
         eps_clip,
-        value_clip,
         ema_decay,
         advantage_offset_constant
     ).to(device)
@@ -621,8 +604,11 @@ def main(
 
     for eps in tqdm(range(num_episodes), desc = 'episodes'):
 
-        state, info = env.reset(seed = seed)
+        state, _ = env.reset(seed = seed)
         state = torch.from_numpy(state).to(device)
+
+        all_rewards = []
+        cum_rewards = 0.
 
         for timestep in range(max_timesteps):
             time += 1
@@ -636,6 +622,8 @@ def main(
             action_to_env = action.cpu().numpy()
 
             next_state, reward, terminated, truncated, _ = env.step(action_to_env)
+
+            cum_rewards += reward
 
             next_state = torch.from_numpy(next_state).to(device)
 
@@ -666,12 +654,19 @@ def main(
 
                 memories.append(bootstrap_value_memory)
 
+            all_rewards.append(cum_rewards)
+
             # updating of the agent
 
             if updating_agent:
+                rewards_tensor = tensor(all_rewards)
+                print(f'mean reward: {rewards_tensor.mean().item():.3f} | max reward: {rewards_tensor.amax().item():.3f}')
+
                 agent.learn(memories)
                 num_policy_updates += 1
+
                 memories.clear()
+                all_rewards.clear()
 
             # break if done
 
