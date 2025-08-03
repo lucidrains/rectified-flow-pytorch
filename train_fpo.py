@@ -461,6 +461,9 @@ class PPO(Module):
         old_actor = deepcopy(self.actor)
         old_actor.eval()
 
+        old_critic = deepcopy(self.critic)
+        old_critic.eval()
+
         # prepare dataloader for policy phase training
 
         learnable = tensor(learnable).to(device)
@@ -489,55 +492,42 @@ class PPO(Module):
 
                 # calculate clipped surrogate objective, but following Algorithm 1 Line 9 formulation for flow policy optimization (FPO)
 
-                loss_diff = (old_loss.detach() - loss)
-
-                ratios = softclamp(loss_diff).exp()
-                ratios = reduce(ratios, 'b a -> b', 'sum')
+                ratios = softclamp(old_loss.detach() - loss).exp()
 
                 advantages = normalize(returns - scalar_old_values.detach()) + self.advantage_offset_constant
+
+                advantages = advantages[..., None]
 
                 # SPO - Xie et al. https://arxiv.org/abs/2401.16025v9
 
                 policy_loss = ratios * advantages - (ratios - 1.).square() * advantages.abs() / (2 * self.eps_clip)
 
-                policy_loss = policy_loss.mean()
+                policy_loss = -policy_loss.sum(dim = -1).mean()
 
                 policy_loss.backward()
                 self.opt_actor.step()
                 self.opt_actor.zero_grad()
 
-                clip = self.value_clip
-
                 # calculate clipped value loss and update value network separate from policy network
 
                 values = self.critic(states)
 
-                scalar_values = hl_gauss(values)
+                value_loss = hl_gauss(values, returns, reduction = 'none')
 
-                # using the proposal from https://www.authorea.com/users/855021/articles/1240083-on-analysis-of-clipped-critic-loss-in-proximal-policy-gradient
+                with torch.no_grad():
+                    old_values = old_critic(states)
+                    old_value_loss = hl_gauss(old_values, returns, reduction = 'none')
 
-                old_values_lo = scalar_old_values - clip
-                old_values_hi = scalar_old_values + clip
+                ratios = softclamp(old_value_loss.detach() - value_loss).exp()
 
-                clipped_returns = returns.clamp(old_values_lo, old_values_hi)
+                critic_loss = ratios - (ratios - 1.).square() / (2 * self.value_clip)
+                critic_loss = -critic_loss.mean()
 
-                clipped_loss = hl_gauss(values, clipped_returns, reduction = 'none')
-                loss = hl_gauss(values, returns, reduction = 'none')
-
-                value_loss = torch.where(
-                    is_between(scalar_values, returns, old_values_lo) |
-                    is_between(scalar_values, old_values_hi, returns),
-                    0.,
-                    torch.min(loss, clipped_loss)
-                )
-
-                value_loss = value_loss.mean()
-
-                value_loss.backward()
+                critic_loss.backward()
                 self.opt_critic.step()
                 self.opt_critic.zero_grad()
 
-            pbar.set_description(f'actor loss: {policy_loss.item():.3f} | critic loss: {value_loss.item():.3f}')
+            pbar.set_description(f'actor loss: {policy_loss.item():.3f} | critic loss: {critic_loss.item():.3f}')
             pbar.update(1)
 
         # update the state normalization with rsmnorm for 1 epoch after actor critic are updated
