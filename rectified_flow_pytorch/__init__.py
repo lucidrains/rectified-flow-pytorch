@@ -13,3 +13,5 @@ from rectified_flow_pytorch.reflow import (
     Reflow,
     ReflowTrainer
 )
+
+from rectified_flow_pytorch.split_mean_flow import SplitMeanFlow

@@ -555,6 +555,7 @@ class Block(Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, scale_shift = None):
+        x = x.contiguous()
         x = self.proj(x)
         x = self.norm(x)
 
