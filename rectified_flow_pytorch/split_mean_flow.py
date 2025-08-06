@@ -120,7 +120,7 @@ class SplitMeanFlow(Module):
         requires_grad = False,
         cond = None,
         noise = None,
-        steps = 4
+        steps = 2
     ):
         data_shape = default(data_shape, self.data_shape)
 
