@@ -42,6 +42,7 @@ model = Unet(
 
 split_mean_flow = SplitMeanFlow(
     model,
+    prob_default_flow_obj = 0.8,
     normalize_data_fn = lambda t: t * 2. - 1.,
     unnormalize_data_fn = lambda t: (t + 1.) / 2.
 )

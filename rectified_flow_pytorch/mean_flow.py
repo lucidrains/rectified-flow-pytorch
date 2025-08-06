@@ -222,7 +222,7 @@ class MeanFlow(Module):
 
         # some set prob of the time, normal flow matching training (times == start integral times)
 
-        normal_flow_match_obj = prob_time_end_start_same > 0. and prob_time_end_start_same < random()
+        normal_flow_match_obj = prob_time_end_start_same > 0. and random() < prob_time_end_start_same
 
         if normal_flow_match_obj:
             integral_start_times = times

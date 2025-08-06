@@ -35,32 +35,14 @@ class SplitMeanFlow(Module):
         normalize_data_fn = identity,
         unnormalize_data_fn = identity,
         use_adaptive_loss_weight = True,
-        adaptive_loss_weight_p = 0.5, # 0.5 is approximately pseudo huber loss
-        use_logit_normal_sampler = True,
-        logit_normal_mean = -.4,
-        logit_normal_std = 1.,
         prob_default_flow_obj = 0.5,
         add_recon_loss = False,
         recon_loss_weight = 1.,
         accept_cond = False,
-        noise_std_dev = 1.,
-        eps = 1e-3
     ):
         super().__init__()
         self.model = model # model must accept three arguments in the order of (<noised data>, <times>, <integral start times>, <maybe condition?>)
         self.data_shape = data_shape
-
-        # weight loss related
-
-        self.use_adaptive_loss_weight = use_adaptive_loss_weight
-        self.adaptive_loss_weight_p = adaptive_loss_weight_p
-        self.eps = eps
-
-        # time sampler
-
-        self.use_logit_normal_sampler = use_logit_normal_sampler
-        self.logit_normal_mean = logit_normal_mean
-        self.logit_normal_std = logit_normal_std
 
         # norm / unnorm data
 
@@ -81,23 +63,11 @@ class SplitMeanFlow(Module):
 
         self.accept_cond = accept_cond
 
-        self.noise_std_dev = noise_std_dev
-
         self.register_buffer('dummy', tensor(0), persistent = False)
 
     @property
     def device(self):
         return self.dummy.device
-
-    def sample_times(self, batch):
-        shape, device = (batch,), self.device
-
-        if not self.use_logit_normal_sampler:
-            return torch.rand(shape, device = device)
-
-        mean = torch.full(shape, self.logit_normal_mean, device = device)
-        std = torch.full(shape, self.logit_normal_std, device = device)
-        return torch.normal(mean, std).sigmoid()
 
     def get_noise(
         self,
@@ -109,7 +79,7 @@ class SplitMeanFlow(Module):
         data_shape = default(data_shape, self.data_shape)
         assert exists(data_shape), 'shape of the data must be passed in, or set at init or during training'
 
-        noise = torch.randn((batch_size, *data_shape), device = device) * self.noise_std_dev
+        noise = torch.randn((batch_size, *data_shape), device = device)
         return noise
 
     @torch.no_grad()
@@ -217,22 +187,22 @@ class SplitMeanFlow(Module):
 
         # flow logic
 
-        times = self.sample_times(batch)
+        times = torch.rand(batch, device = device)
 
         # some set prob of the time, normal flow matching training (times == start integral times)
         # this enforces the boundary condition u(zt, t, t) = v(zt, t)
 
-        normal_flow_match_obj = prob_time_end_start_same > 0. and prob_time_end_start_same < random()
+        normal_flow_match_obj = prob_time_end_start_same > 0. and random() < prob_time_end_start_same
 
         if normal_flow_match_obj:
             integral_start_times = times # r = t for boundary condition
         else:
-            integral_start_times = self.sample_times(batch) * times # restrict range to [0, times]
+            integral_start_times = torch.rand(batch, device = device) * times # restrict range to [0, times]
 
         # derive flows
 
         if not exists(noise):
-            noise = torch.randn_like(data) * self.noise_std_dev
+            noise = torch.randn_like(data)
 
         flow = noise - data # flow is the velocity from data to noise
 
@@ -264,36 +234,28 @@ class SplitMeanFlow(Module):
             
             # compute u(zt, s, t) - velocity from s to t
             delta_s_to_t = times - split_times
-            u2 = self.model(noised_data, times, delta_s_to_t, *maybe_cond)
+
+            with torch.no_grad():
+                u2 = self.model(noised_data, times, delta_s_to_t, *maybe_cond).detach()
             
             # compute zs = zt - (t - s) * u2
             padded_delta_s_to_t = append_dims(delta_s_to_t, ndim - 1)
-            noised_data_s = noised_data - padded_delta_s_to_t * u2.detach() # detach for stop gradient
+            noised_data_s = noised_data - padded_delta_s_to_t * u2 # detach for stop gradient
             
             # compute u(zs, r, s) - velocity from r to s
             delta_r_to_s = split_times - integral_start_times
-            u1 = self.model(noised_data_s, split_times, delta_r_to_s, *maybe_cond)
+
+            with torch.no_grad():
+                u1 = self.model(noised_data_s, split_times, delta_r_to_s, *maybe_cond).detach()
             
             # the algebraic consistency target: u(zt, r, t) = (1 - lambda) * u1 + lambda * u2
             lambda_split_padded = append_dims(lambda_split, ndim - 1)
-            target = (1 - lambda_split_padded) * u1.detach() + lambda_split_padded * u2.detach()
+            target = (1 - lambda_split_padded) * u1 + lambda_split_padded * u2
             
             # predict u(zt, r, t)
             pred = self.model(noised_data, times, delta_times, *maybe_cond)
 
-        flow_loss = F.mse_loss(pred, target, reduction = 'none')
-
-        # section 4.3 of meanflow paper
-
-        if self.use_adaptive_loss_weight:
-            flow_loss = reduce(flow_loss, 'b ... -> b', 'mean')
-
-            p = self.adaptive_loss_weight_p
-            loss_weight = 1. / (flow_loss + self.eps).pow(p)
-
-            flow_loss = flow_loss * loss_weight.detach()
-
-        flow_loss = flow_loss.mean()
+        flow_loss = F.mse_loss(pred, target)
 
         if not self.add_recon_loss:
             if not return_loss_breakdown:
