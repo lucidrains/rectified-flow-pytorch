@@ -99,19 +99,17 @@ class SplitMeanFlow(Module):
         if not exists(noise):
             noise = self.get_noise(batch_size, data_shape = data_shape)
 
-        times = torch.linspace(1., 0., steps + 1, device = device)[:-1]
+        times = torch.linspace(0., 1., steps + 1, device = device)[:-1]
         delta = 1. / steps
 
         denoised = noise
 
         maybe_cond = (cond,) if self.accept_cond else ()
 
-        delta_time = zeros(batch_size, device = device)
-
         for time in times:
             time = time.expand(batch_size)
-            pred_flow = self.model(denoised, time, delta_time, *maybe_cond)
-            denoised = denoised - delta * pred_flow
+            pred_flow = self.model(denoised, time, time, *maybe_cond)
+            denoised = denoised + delta * pred_flow
 
         return self.unnormalize_data_fn(denoised)
 
@@ -122,7 +120,7 @@ class SplitMeanFlow(Module):
         requires_grad = False,
         cond = None,
         noise = None,
-        steps = 1
+        steps = 2
     ):
         data_shape = default(data_shape, self.data_shape)
 
@@ -204,15 +202,14 @@ class SplitMeanFlow(Module):
         if not exists(noise):
             noise = torch.randn_like(data)
 
-        flow = noise - data # flow is the velocity from data to noise
+        flow = data - noise # flow is the velocity from noise to data
 
         padded_times = append_dims(times, ndim - 1)
-        noised_data = data.lerp(noise, padded_times) # zt = (1-t)*x + t*noise
+        noised_data = noise.lerp(data, padded_times) # noise the data with random amounts of noise (time) - lerp is read as noise -> data from 0. to 1.
 
         # condition the network on the delta times
 
         delta_times = times - integral_start_times # (t - r)
-        padded_delta_times = append_dims(delta_times, ndim - 1)
 
         # maybe condition
 
@@ -221,7 +218,7 @@ class SplitMeanFlow(Module):
         if normal_flow_match_obj:
             # normal flow matching for boundary condition u(zt, t, t) = v(zt, t)
 
-            pred = self.model(noised_data, times, delta_times, *maybe_cond)
+            pred = self.model(noised_data, times, times, *maybe_cond)
             target = flow
         else:
             # algorithm 1 - interval splitting consistency
@@ -268,6 +265,7 @@ class SplitMeanFlow(Module):
         if normal_flow_match_obj:
             pred_data = noised_data - pred * padded_times
         else:
+            padded_delta_times = append_dims(delta_times, ndim - 1)
             pred_data = noised_data - pred * padded_delta_times
             
         recon_loss = F.mse_loss(pred_data, data)
