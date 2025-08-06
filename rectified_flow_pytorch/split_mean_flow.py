@@ -202,7 +202,7 @@ class SplitMeanFlow(Module):
         if not exists(noise):
             noise = torch.randn_like(data)
 
-        flow = data - noise # flow is the velocity from data to noise
+        flow = data - noise # flow is the velocity from noise to data
 
         padded_times = append_dims(times, ndim - 1)
         noised_data = noise.lerp(data, padded_times) # noise the data with random amounts of noise (time) - lerp is read as noise -> data from 0. to 1.
