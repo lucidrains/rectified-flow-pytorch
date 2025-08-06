@@ -4,7 +4,7 @@ from random import random
 from contextlib import nullcontext
 
 import torch
-from torch import tensor, ones, zeros
+from torch import tensor, stack, ones, zeros
 from torch.nn import Module
 import torch.nn.functional as F
 from torch.func import jvp
@@ -227,7 +227,10 @@ class MeanFlow(Module):
         if normal_flow_match_obj:
             integral_start_times = times
         else:
-            integral_start_times = self.sample_times(batch) * times # restrict range to [0, times]
+            # section 4.3 logic for choosing r and t
+            second_times = self.sample_times(batch)
+            sorted_times = stack((times, second_times), dim = -1).sort(dim = -1)
+            integral_start_times, times = sorted_times.values.unbind(dim = -1)
 
         # derive flows
 
