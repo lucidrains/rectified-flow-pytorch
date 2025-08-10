@@ -269,7 +269,7 @@ class RectifiedFlow(Module):
     def device(self):
         return next(self.model.parameters()).device
 
-    def predict_flow(self, model: Module, noised, *, times, eps = 1e-10):
+    def predict_flow(self, model: Module, noised, *, times, eps = 1e-10, **model_kwargs):
         """
         returns the model output as well as the derived flow, depending on the `predict` objective
         """
@@ -278,7 +278,6 @@ class RectifiedFlow(Module):
 
         # prepare maybe time conditioning for model
 
-        model_kwargs = dict()
         time_kwarg = self.time_cond_kwarg
 
         if exists(time_kwarg):
@@ -424,7 +423,7 @@ class RectifiedFlow(Module):
 
             flow = data - noise
 
-            model_output, model_output = self.predict_flow(model, noised, times = t)
+            model_output, model_output = self.predict_flow(model, noised, times = t, **model_kwargs)
 
             # if mean variance network, sample from normal
 
