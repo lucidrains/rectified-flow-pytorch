@@ -357,9 +357,7 @@ class RectifiedFlow(Module):
             flow = output
 
             if self.mean_variance_net:
-                mean, variance = output
-
-                std = variance.clamp(min = 1e-5).sqrt()
+                mean, std = output
 
                 flow = torch.normal(mean, std * temperature)
 
@@ -891,8 +889,10 @@ class Unet(Module):
             return out
 
         mean, log_var = rearrange(out, 'b (c mean_log_var) h w -> mean_log_var b c h w', mean_log_var = 2)
-        variance = log_var.exp() # variance needs to be positive
-        return stack((mean, variance))
+
+        std = (0.5 * log_var).exp()
+
+        return stack((mean, std))
 
 # dataset classes
 
