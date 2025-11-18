@@ -223,3 +223,15 @@ $ python train_oxford.py
     url     = {https://arxiv.org/abs/2507.21053}, 
 }
 ```
+
+```bibtex
+@misc{li2025basicsletdenoisinggenerative,
+    title   = {Back to Basics: Let Denoising Generative Models Denoise}, 
+    author  = {Tianhong Li and Kaiming He},
+    year    = {2025},
+    eprint  = {2511.13720},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.CV},
+    url     = {https://arxiv.org/abs/2511.13720}, 
+}
+```

@@ -143,7 +143,7 @@ class RectifiedFlow(Module):
             rtol = 1e-5,
             method = 'midpoint'
         ),
-        predict: Literal['flow', 'noise'] = 'flow',
+        predict: Literal['flow', 'noise', 'clean'] = 'flow',
         loss_fn: Literal[
             'mse',
             'pseudo_huber',
@@ -167,7 +167,8 @@ class RectifiedFlow(Module):
         clip_during_sampling = False,
         clip_values: tuple[float, float] = (-1., 1.),
         clip_flow_during_sampling = None, # this seems to help a lot when training with predict epsilon, at least for me
-        clip_flow_values: tuple[float, float] = (-3., 3)
+        clip_flow_values: tuple[float, float] = (-3., 3),
+        eps = 5e-3
     ):
         super().__init__()
 
@@ -265,11 +266,15 @@ class RectifiedFlow(Module):
         self.data_normalize_fn = default(data_normalize_fn, identity)
         self.data_unnormalize_fn = default(data_unnormalize_fn, identity)
 
+        # epsilon for noise and clean predict objectives
+
+        self.eps = eps
+
     @property
     def device(self):
         return next(self.model.parameters()).device
 
-    def predict_flow(self, model: Module, noised, *, times, eps = 1e-10, **model_kwargs):
+    def predict_flow(self, model: Module, noised, *, times, **model_kwargs):
         """
         returns the model output as well as the derived flow, depending on the `predict` objective
         """
@@ -299,8 +304,15 @@ class RectifiedFlow(Module):
             noise = output
             padded_times = append_dims(times, noised.ndim - 1)
 
-            flow = (noised - noise) / padded_times.clamp(min = eps)
+            flow = (noised - noise) / padded_times.clamp(min = self.eps)
 
+        elif self.predict == 'clean':
+            assert not self.mean_variance_net, f'cannot be probabilistic'
+
+            clean = output
+            padded_times = append_dims(times, noised.ndim - 1)
+
+            flow = (clean - noised) / (1. - padded_times).clamp(min = self.eps)
         else:
             raise ValueError(f'unknown objective {self.predict}')
 
@@ -452,15 +464,20 @@ class RectifiedFlow(Module):
         # determine target, depending on objective
 
         if self.predict == 'flow':
+            pred = output
             target = flow
         elif self.predict == 'noise':
+            pred = output
             target = noise
+        elif self.predict == 'clean':
+            pred = pred_flow
+            target = flow
         else:
             raise ValueError(f'unknown objective {self.predict}')
 
         # losses
 
-        main_loss = self.loss_fn(output, target, pred_data = pred_data, times = times, data = data)
+        main_loss = self.loss_fn(pred, target, pred_data = pred_data, times = times, data = data)
 
         consistency_loss = data_match_loss = velocity_match_loss = 0.
 
