@@ -301,18 +301,26 @@ class RectifiedFlow(Module):
             flow = output
 
         elif self.predict == 'noise':
+            assert not self.mean_variance_net, f'cannot be probabilistic'
+
             noise = output
             padded_times = append_dims(times, noised.ndim - 1)
 
             flow = (noised - noise) / padded_times.clamp(min = self.eps)
 
         elif self.predict == 'clean':
-            assert not self.mean_variance_net, f'cannot be probabilistic'
 
             clean = output
             padded_times = append_dims(times, noised.ndim - 1)
 
-            flow = (clean - noised) / (1. - padded_times).clamp(min = self.eps)
+            if self.mean_variance_net:
+                mean, std = clean
+                scale = 1. / (1. - padded_times).clamp(min = self.eps)
+                new_mean = (mean - noised) * scale
+                new_std = std * scale
+                flow = stack((new_mean, new_std))
+            else:
+                flow = (clean - noised) / (1. - padded_times).clamp(min = self.eps)
         else:
             raise ValueError(f'unknown objective {self.predict}')
 
@@ -433,19 +441,17 @@ class RectifiedFlow(Module):
 
             flow = data - noise
 
-            model_output, model_output = self.predict_flow(model, noised, times = t, **model_kwargs)
-
-            # if mean variance network, sample from normal
-
-            pred_flow = model_output
-
-            if self.mean_variance_net:
-                mean, variance = model_output
-                pred_flow = torch.normal(mean, variance)
+            model_output, pred_flow = self.predict_flow(model, noised, times = t, **model_kwargs)
 
             # predicted data will be the noised xt + flow * (1. - t)
 
-            pred_data = noised + pred_flow * (1. - t)
+            if self.mean_variance_net:
+                mean, std = pred_flow
+                new_mean = noised + mean * (1. - t)
+                new_std = std * (1. - t)
+                pred_data = ((new_mean, new_std))
+            else:
+                pred_data = noised + pred_flow * (1. - t)
 
             return model_output, flow, pred_flow, pred_data
 

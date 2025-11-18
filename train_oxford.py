@@ -35,7 +35,8 @@ flowers_dataset = OxfordFlowersDataset(
 from rectified_flow_pytorch import RectifiedFlow, Unet, Trainer
 
 model = Unet(
-    dim = 64
+    dim = 64,
+    mean_variance_net = True
 )
 
 rectified_flow = RectifiedFlow(model, predict = 'clean')
