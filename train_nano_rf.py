@@ -38,6 +38,7 @@ model = Unet(dim = 64)
 
 rectified_flow = NanoFlow(
     model,
+    predict_clean = False,
     times_cond_kwarg = 'times',
     normalize_data_fn = lambda t: t * 2. - 1.,
     unnormalize_data_fn = lambda t: (t + 1.) / 2.

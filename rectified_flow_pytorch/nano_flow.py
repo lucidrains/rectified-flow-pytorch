@@ -24,6 +24,8 @@ class NanoFlow(Module):
         data_shape = None,
         normalize_data_fn = identity,
         unnormalize_data_fn = identity,
+        predict_clean = False,
+        eps = 5e-3
     ):
         super().__init__()
         self.model = model
@@ -32,6 +34,9 @@ class NanoFlow(Module):
 
         self.normalize_data_fn = normalize_data_fn
         self.unnormalize_data_fn = unnormalize_data_fn
+
+        self.predict_clean = predict_clean # predicting x0
+        self.eps = eps
 
     @torch.no_grad()
     def sample(
@@ -59,7 +64,13 @@ class NanoFlow(Module):
             time = time.expand(batch_size)
             time_kwarg = {self.times_cond_kwarg: time} if exists(self.times_cond_kwarg) else dict()
 
-            pred_flow = self.model(denoised, **time_kwarg, **kwargs)
+            model_output = self.model(denoised, **time_kwarg, **kwargs)
+
+            if self.predict_clean:
+                pred_flow = (model_output - denoised) / (1. - time).clamp_min(self.eps)
+            else:
+                pred_flow = model_output
+
             denoised = denoised + delta * pred_flow
 
         out = self.unnormalize_data_fn(denoised)
@@ -88,7 +99,12 @@ class NanoFlow(Module):
         noised_data = noise.lerp(data, padded_times) # noise the data with random amounts of noise (time) - lerp is read as noise -> data from 0. to 1.
 
         time_kwarg = {self.times_cond_kwarg: times} if exists(self.times_cond_kwarg) else dict() # maybe time conditioning, could work without it (https://arxiv.org/abs/2502.13129v1)
-        pred_flow = self.model(noised_data, **time_kwarg, **kwargs)
+        model_output = self.model(noised_data, **time_kwarg, **kwargs)
+
+        if self.predict_clean:
+            pred_flow = (model_output - noised_data) / (1. - padded_times).clamp_min(self.eps)
+        else:
+            pred_flow = model_output
 
         return F.mse_loss(flow, pred_flow, reduction = loss_reduction)
 
