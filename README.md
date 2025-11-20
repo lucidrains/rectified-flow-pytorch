@@ -235,3 +235,15 @@ $ python train_oxford.py
     url     = {https://arxiv.org/abs/2511.13720}, 
 }
 ```
+
+```bibtex
+@misc{clavier2024bootstrappingexpectilesreinforcementlearning,
+    title   = {Bootstrapping Expectiles in Reinforcement Learning}, 
+    author  = {Pierre Clavier and Emmanuel Rachelson and Erwan Le Pennec and Matthieu Geist},
+    year    = {2024},
+    eprint  = {2406.04081},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.LG},
+    url     = {https://arxiv.org/abs/2406.04081}, 
+}
+```

@@ -1,8 +1,7 @@
-
 # along same veins as https://arxiv.org/abs/2502.02538
 # but no more distillation and all that
-# before you email me, just go ahead and write the paper, no cites needed if it works
-# https://seohong.me/blog/q-learning-is-not-yet-scalable/
+
+# https://openreview.net/forum?id=mIeKe74W43
 
 from __future__ import annotations
 
@@ -61,6 +60,26 @@ def default(v, d):
 def divisible_by(num, den):
     return (num % den) == 0
 
+# expectile regression
+# for expectile bellman proposed by https://arxiv.org/abs/2406.04081v1, which obviates need for twin critic for alleviating overestimation bias
+
+def expectile_l2_loss(
+    x,
+    target,
+    tau = 0.5  # 0.5 would be the classic l2 loss - less would weigh negative higher, and more would weigh positive higher
+):
+    assert 0 <= tau <= 1.
+
+    if tau == 0.5:
+        return F.mse_loss(x, target)
+
+    loss = F.mse_loss(x, target, reduction = 'none')
+
+    less_than_zero = loss < 0
+    weight = (tau - less_than_zero.float()) 
+
+    return (weight * loss).mean()
+
 # agent
 
 class Actor(Module):
@@ -115,7 +134,8 @@ class Agent(Module):
         ema_decay,
         flow_loss_weight = 0.25,
         noise_std_dev = 2.,
-        update_critic_with_ema_every = 100_000
+        update_critic_with_ema_every = 100_000,
+        pessimism_strength = 0.05
     ):
         super().__init__()
 
@@ -158,6 +178,10 @@ class Agent(Module):
 
         self.flow_loss_weight = flow_loss_weight
 
+        # how much below `tau` for expectile regression
+
+        self.pessimism_strength = pessimism_strength
+
     def learn(self, memories):
 
         # retrieve and prepare data from memory for training
@@ -194,7 +218,7 @@ class Agent(Module):
                 pred_q = self.critic(states, actions)
                 target_q = rewards.float() + (~terminal).float() * self.discount_factor * ema_critic_copy(next_states, next_actions)
 
-                critic_loss = F.mse_loss(pred_q, target_q)
+                critic_loss = expectile_l2_loss(pred_q, target_q, tau = 0.5 - self.pessimism_strength)
                 critic_loss.backward()
 
                 self.opt_critic.step()
