@@ -158,6 +158,7 @@ class RectifiedFlow(Module):
         data_shape: tuple[int, ...] | None = None,
         immiscible = False,
         use_consistency = False,
+        max_timesteps = 100,
         consistency_decay = 0.9999,
         consistency_velocity_match_alpha = 1e-5,
         consistency_delta_time = 1e-3,
@@ -191,6 +192,8 @@ class RectifiedFlow(Module):
         # objective - either flow or noise (proposed by Esser / Rombach et al in SD3)
 
         self.predict = predict
+
+        self.max_timesteps = max_timesteps # when predicting clean, just make sure time never more than 1. - (1. / max_timesteps)
 
         # automatically default to a working setting for predict epsilon
 
@@ -266,7 +269,7 @@ class RectifiedFlow(Module):
         self.data_normalize_fn = default(data_normalize_fn, identity)
         self.data_unnormalize_fn = default(data_unnormalize_fn, identity)
 
-        # epsilon for noise and clean predict objectives
+        # epsilon for noise objective
 
         self.eps = eps
 
@@ -315,12 +318,12 @@ class RectifiedFlow(Module):
 
             if self.mean_variance_net:
                 mean, std = clean
-                scale = 1. / (1. - padded_times).clamp(min = self.eps)
+                scale = 1. / (1. - padded_times)
                 new_mean = (mean - noised) * scale
                 new_std = std * scale
                 flow = stack((new_mean, new_std))
             else:
-                flow = (clean - noised) / (1. - padded_times).clamp(min = self.eps)
+                flow = (clean - noised) / (1. - padded_times)
         else:
             raise ValueError(f'unknown objective {self.predict}')
 
@@ -418,6 +421,12 @@ class RectifiedFlow(Module):
         # times, and times with dimension padding on right
 
         times = torch.rand(batch, device = self.device)
+
+        # maybe cap times when predicting clean
+
+        if self.predict == 'clean':
+            times = times * (1. - self.max_timesteps ** -1)
+
         padded_times = append_dims(times, data.ndim - 1)
 
         # time needs to be from [0, 1 - delta_time] if using consistency loss

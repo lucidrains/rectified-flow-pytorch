@@ -25,7 +25,7 @@ class NanoFlow(Module):
         normalize_data_fn = identity,
         unnormalize_data_fn = identity,
         predict_clean = False,
-        eps = 5e-3
+        max_timesteps = 100
     ):
         super().__init__()
         self.model = model
@@ -36,7 +36,7 @@ class NanoFlow(Module):
         self.unnormalize_data_fn = unnormalize_data_fn
 
         self.predict_clean = predict_clean # predicting x0
-        self.eps = eps
+        self.max_timesteps = max_timesteps
 
     @torch.no_grad()
     def sample(
@@ -47,7 +47,7 @@ class NanoFlow(Module):
         return_noise = False,
         **kwargs
     ):
-        assert steps >= 1
+        assert 1 <= steps <= self.max_timesteps
 
         data_shape = default(data_shape, self.data_shape)
         assert exists(data_shape), 'shape of the data must be passed in, or set at init or during training'
@@ -67,7 +67,8 @@ class NanoFlow(Module):
             model_output = self.model(denoised, **time_kwarg, **kwargs)
 
             if self.predict_clean:
-                pred_flow = (model_output - denoised) / (1. - time).clamp_min(self.eps)
+                padded_time = append_dims(time, denoised.ndim - 1)
+                pred_flow = (model_output - denoised) / (1. - padded_time)
             else:
                 pred_flow = model_output
 
@@ -92,6 +93,8 @@ class NanoFlow(Module):
         # flow logic
 
         times = default(times, torch.rand(batch, device = device))
+        times = times * (1. - self.max_timesteps ** -1)
+
         noise = default(noise, torch.randn_like(data))
         flow = data - noise # flow is the velocity from noise to data, also what the model is trained to predict
 
@@ -102,7 +105,7 @@ class NanoFlow(Module):
         model_output = self.model(noised_data, **time_kwarg, **kwargs)
 
         if self.predict_clean:
-            pred_flow = (model_output - noised_data) / (1. - padded_times).clamp_min(self.eps)
+            pred_flow = (model_output - noised_data) / (1. - padded_times)
         else:
             pred_flow = model_output
 
