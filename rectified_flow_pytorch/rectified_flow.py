@@ -309,21 +309,22 @@ class RectifiedFlow(Module):
             noise = output
             padded_times = append_dims(times, noised.ndim - 1)
 
-            flow = (noised - noise) / padded_times.clamp(min = self.eps)
+            flow = (noised - noise) / padded_times.clamp_min(self.eps)
 
         elif self.predict == 'clean':
 
             clean = output
+
             padded_times = append_dims(times, noised.ndim - 1)
+            scale = 1. / (1. - padded_times).clamp_min(self.eps)
 
             if self.mean_variance_net:
                 mean, std = clean
-                scale = 1. / (1. - padded_times)
                 new_mean = (mean - noised) * scale
                 new_std = std * scale
                 flow = stack((new_mean, new_std))
             else:
-                flow = (clean - noised) / (1. - padded_times)
+                flow = (clean - noised) * scale
         else:
             raise ValueError(f'unknown objective {self.predict}')
 

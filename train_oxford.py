@@ -36,7 +36,7 @@ from rectified_flow_pytorch import RectifiedFlow, Unet, Trainer
 
 model = Unet(
     dim = 64,
-    mean_variance_net = True
+    mean_variance_net = False
 )
 
 rectified_flow = RectifiedFlow(model, predict = 'clean')
