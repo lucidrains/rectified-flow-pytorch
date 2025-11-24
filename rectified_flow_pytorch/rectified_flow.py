@@ -473,7 +473,10 @@ class RectifiedFlow(Module):
 
         if self.use_consistency:
             delta_t = self.consistency_delta_time
-            ema_output, ema_flow, ema_pred_flow, ema_pred_data = get_noised_and_flows(self.ema_model, padded_times + delta_t)
+
+            with torch.no_grad():
+                self.ema_model.eval()
+                ema_output, ema_flow, ema_pred_flow, ema_pred_data = get_noised_and_flows(self.ema_model, padded_times + delta_t)
 
         # determine target, depending on objective
 
