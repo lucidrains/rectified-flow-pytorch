@@ -30,7 +30,6 @@ from einops import rearrange, repeat, reduce, einsum, pack
 from ema_pytorch import EMA
 
 from x_mlps_pytorch import Feedforwards
-from x_mlps_pytorch.grouped_ff import GroupedFeedforwards
 
 from rectified_flow_pytorch.mean_flow import MeanFlow
 
@@ -42,7 +41,6 @@ device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
 Memory = namedtuple('Memory', [
     'state',
-    'noise',
     'action',
     'reward',
     'next_state',
@@ -106,16 +104,12 @@ class Actor(Module):
 class Critic(Module):
     def __init__(self, **kwargs):
         super().__init__()
-        self.ff = GroupedFeedforwards(**kwargs, groups = 2)
+        self.ff = Feedforwards(**kwargs)
 
     def forward(self, states, actions):
         states_actions = cat((states, actions), dim = -1)
         q_values = self.ff(states_actions)
-        q_values = rearrange(q_values, '... 1 -> ...')
-
-        # treating overestimation bias w/ N critics trick
-
-        return reduce(q_values, '... g -> ...', 'min').sigmoid()
+        return rearrange(q_values, '... 1 -> ...')
 
 class Agent(Module):
     def __init__(
@@ -202,21 +196,21 @@ class Agent(Module):
 
         # updating actor / critic
 
-        ema_critic_copy = deepcopy(self.ema_critic)
-
         with tqdm(range(self.epochs)) as pbar:
-            for states, noise, actions, rewards, next_states, terminal in dl:
+            for states, actions, rewards, next_states, terminal in dl:
 
                 self.opt_critic.zero_grad()
 
                 # the flow q-learning proposed here https://seohong.me/projects/fql/ is now simplified
+
+                noise = torch.randn_like(actions)
 
                 next_actions = self.mean_flow_actor.sample(noise = noise, cond = next_states)
 
                 # learn critic
 
                 pred_q = self.critic(states, actions)
-                target_q = rewards.float() + (~terminal).float() * self.discount_factor * ema_critic_copy(next_states, next_actions)
+                target_q = rewards.float() + (~terminal).float() * self.discount_factor * self.ema_critic(next_states, next_actions)
 
                 critic_loss = expectile_l2_loss(pred_q, target_q, tau = 0.5 - self.pessimism_strength)
                 critic_loss.backward()
@@ -228,21 +222,25 @@ class Agent(Module):
                 pbar.update(1)
 
         with tqdm(range(self.epochs)) as pbar:
-            for states, noise, actions, rewards, next_states, terminal in dl:
+            for states, actions, rewards, next_states, terminal in dl:
 
                 # flow loss
+
+                noise = torch.randn_like(actions)
 
                 flow_loss = self.mean_flow_actor(actions, noise = noise, cond = states)
 
                 # actor learning to maximize q value
 
+                noise = torch.randn_like(actions)
+
                 sampled_actions = self.mean_flow_actor.sample(cond = states, noise = noise, requires_grad = True) # 1-step sample from mean flow paper, no more issue
 
-                q_value = self.ema_critic(states, sampled_actions)
+                q_value = self.critic(states, sampled_actions)
 
                 # total actor loss
 
-                actor_loss = -(q_value.square() * q_value.sign()).mean() + (flow_loss * self.flow_loss_weight)
+                actor_loss = -q_value.mean() + (flow_loss * self.flow_loss_weight)
                 actor_loss.backward()
 
                 self.opt_actor.step()
@@ -343,8 +341,7 @@ def main(
 
             next_state = torch.from_numpy(next_state).to(device)
 
-            noise = rearrange(noise, '1 a -> a')
-            memory = Memory(state, noise, actions, tensor(reward), next_state, tensor(terminated))
+            memory = Memory(state, actions, tensor(reward), next_state, tensor(terminated))
 
             memories.append(memory)
 
