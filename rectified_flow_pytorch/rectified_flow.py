@@ -848,7 +848,7 @@ class Unet(Module):
         # can predict multiple output, for testing multiple objectives
 
         self.num_outputs = num_outputs
-        self.final_conv = nn.Conv2d(init_dim, self.out_dim, 1)
+        self.final_conv = nn.Conv2d(init_dim, self.out_dim * num_outputs, 1)
 
     @property
     def downsample_factor(self):

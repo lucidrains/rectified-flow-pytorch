@@ -36,7 +36,7 @@ from rectified_flow_pytorch import NanoFlow, Unet, Trainer
 
 model = Unet(dim = 64)
 
-rectified_flow = NanoFlow(
+nano_flow = NanoFlow(
     model,
     predict_clean = True,
     times_cond_kwarg = 'times',
@@ -45,7 +45,7 @@ rectified_flow = NanoFlow(
 )
 
 trainer = Trainer(
-    rectified_flow,
+    nano_flow,
     dataset = flowers_dataset,
     num_train_steps = 70_000,
     results_folder = './results'   # samples will be saved periodically to this folder
