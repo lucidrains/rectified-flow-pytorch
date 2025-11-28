@@ -1,5 +1,8 @@
-# Flow Policy Optimization
+# Flow Policy Optimization (FPO)
 # McAllister et al. https://arxiv.org/abs/2507.21053
+
+# Flow Policy Gradients for Legged Robots (FPO++)
+# https://openreview.net/forum?id=BA6n0nmagi
 
 from __future__ import annotations
 
@@ -49,7 +52,6 @@ Memory = namedtuple('Memory', [
     'learnable',
     'state',
     'action',
-    'noise',
     'reward',
     'is_boundary',
     'value',
@@ -69,9 +71,6 @@ def divisible_by(num, den):
 def normalize(t, eps = 1e-5):
     return (t - t.mean()) / (t.std() + eps)
 
-def softclamp(t, value = 15.):
-    return (t / value).tanh() * value
-
 def is_between(mid, lo, hi):
     return (lo < mid) & (mid < hi)
 
@@ -80,56 +79,6 @@ def add_batch(t):
 
 def remove_batch(t):
     return rearrange(t, '1 ... -> ...')
-
-# RSM Norm (not to be confused with RMSNorm from transformers)
-# this was proposed by SimBa https://arxiv.org/abs/2410.09754
-# experiments show this to outperform other types of normalization
-
-class RSMNorm(Module):
-    def __init__(
-        self,
-        dim,
-        eps = 1e-5
-    ):
-        # equation (3) in https://arxiv.org/abs/2410.09754
-        super().__init__()
-        self.dim = dim
-        self.eps = 1e-5
-
-        self.register_buffer('step', tensor(1))
-        self.register_buffer('running_mean', torch.zeros(dim))
-        self.register_buffer('running_variance', torch.ones(dim))
-
-    def forward(
-        self,
-        x
-    ):
-        assert x.shape[-1] == self.dim, f'expected feature dimension of {self.dim} but received {x.shape[-1]}'
-
-        time = self.step.item()
-        mean = self.running_mean
-        variance = self.running_variance
-
-        normed = (x - mean) / variance.sqrt().clamp(min = self.eps)
-
-        if not self.training:
-            return normed
-
-        # update running mean and variance
-
-        with torch.no_grad():
-
-            new_obs_mean = reduce(x, '... d -> d', 'mean')
-            delta = new_obs_mean - mean
-
-            new_mean = mean + delta / time
-            new_variance = (time - 1) / time * (variance + (delta ** 2) / time)
-
-            self.step.add_(1)
-            self.running_mean.copy_(new_mean)
-            self.running_variance.copy_(new_variance)
-
-        return normed
 
 # SimBa - Kaist + SonyAI
 
@@ -233,10 +182,8 @@ class Actor(Module):
         dim_time = 16,
         mlp_depth = 2,
         dropout = 0.1,
-        rsmnorm_input = True  # use the RSMNorm for inputs proposed by KAIST + SonyAI
     ):
         super().__init__()
-        self.rsmnorm = RSMNorm(state_dim) if rsmnorm_input else nn.Identity()
 
         self.to_time_emb = nn.Sequential(
             RandomFourierEmbed(dim_time),
@@ -258,10 +205,6 @@ class Actor(Module):
         )
 
     def forward(self, noised_actions, *, state, time):
-        with torch.no_grad():
-            self.rsmnorm.eval()
-            state = self.rsmnorm(state)
-
         time_emb = self.to_time_emb(time)
 
         inp = cat((noised_actions, state, time_emb), dim = -1)
@@ -276,10 +219,8 @@ class Critic(Module):
         dim_pred = 1,
         mlp_depth = 6, # recent paper has findings that show scaling critic is more important than scaling actor
         dropout = 0.1,
-        rsmnorm_input = True
     ):
         super().__init__()
-        self.rsmnorm = RSMNorm(state_dim) if rsmnorm_input else nn.Identity()
 
         self.net = SimBa(
             state_dim,
@@ -291,11 +232,6 @@ class Critic(Module):
         self.value_head = nn.Linear(hidden_dim, dim_pred)
 
     def forward(self, x):
-
-        with torch.no_grad():
-            self.rsmnorm.eval()
-            x = self.rsmnorm(x)
-
         hidden = self.net(x)
         value = self.value_head(hidden)
         return value
@@ -350,20 +286,25 @@ class PPO(Module):
         ema_kwargs: dict = dict(
             update_model_with_ema_every = 1000
         ),
-        reward_range = (-100., 100.),
+        reward_range = (-300., 300.),
+        num_noise_monte_carlo = 4,
+        loss_diff_clamp_value = 8.,
         save_path = './fpo.pt'
     ):
         super().__init__()
 
         actor_network = Actor(state_dim, actor_hidden_dim, num_actions)
-        self.actor = NanoFlow(actor_network, data_shape = (num_actions,), times_cond_kwarg = 'time')
+        self.actor = NanoFlow(actor_network, data_shape = (num_actions,), times_cond_kwarg = 'time', loss_fn = F.huber_loss)
 
         self.critic = Critic(state_dim, critic_hidden_dim, dim_pred = critic_pred_num_bins)
 
-        # weight tie rsmnorm
+        # num noise monte carlo
 
-        self.rsmnorm = self.actor.model.rsmnorm
-        self.critic.rsmnorm = self.rsmnorm
+        self.num_noise_monte_carlo = num_noise_monte_carlo
+
+        # clamps
+
+        self.loss_diff_clamp_value = loss_diff_clamp_value
 
         # https://arxiv.org/abs/2403.03950
 
@@ -414,6 +355,7 @@ class PPO(Module):
         self.critic.load_state_dict(data['critic'])
 
     def learn(self, memories):
+        eps_clip = self.eps_clip
         hl_gauss = self.critic_hl_gauss_loss
 
         # retrieve and prepare data from memory for training
@@ -422,7 +364,6 @@ class PPO(Module):
             learnable,
             states,
             action,
-            noise,
             rewards,
             is_boundaries,
             values,
@@ -451,7 +392,6 @@ class PPO(Module):
 
         states = to_torch_tensor(states)
         action = to_torch_tensor(action)
-        noise = to_torch_tensor(noise)
         old_values = to_torch_tensor(values)
 
         # deepcopy the actor for the reference actor
@@ -462,7 +402,7 @@ class PPO(Module):
         # prepare dataloader for policy phase training
 
         learnable = tensor(learnable).to(device)
-        data = (states, action, noise, returns, old_values)
+        data = (states, action, returns, old_values)
         data = tuple(t[learnable] for t in data)
 
         dataset = TensorDataset(*data)
@@ -471,13 +411,23 @@ class PPO(Module):
 
         # policy phase training, similar to original PPO
 
+        n_mc = self.num_noise_monte_carlo
+        clamp_value = self.loss_diff_clamp_value
+
         with tqdm(range(self.epochs)) as pbar:
-            for i, (states, action, noise, returns, old_values) in enumerate(dl):
+            for i, (states, action, returns, old_values) in enumerate(dl):
 
                 batch = action.shape[0]
-                times = torch.rand((batch,), device = action.device)
 
-                actor_forward_kwargs = dict(state = states, noise = noise, times = times, loss_reduction = 'none')
+                times = torch.rand((batch * n_mc,), device = action.device)
+
+                expanded_states = repeat(states, 'b ... -> (b n) ...', n = n_mc)
+                action = repeat(action, 'b ... -> (b n) ...', n = n_mc)
+
+                noise = torch.randn_like(action)
+
+                actor_forward_kwargs = dict(state = expanded_states, noise = noise, times = times, loss_reduction = 'none')
+
                 loss = self.actor(action, **actor_forward_kwargs)
 
                 with torch.no_grad():
@@ -487,15 +437,27 @@ class PPO(Module):
 
                 # calculate clipped surrogate objective, but following Algorithm 1 Line 9 formulation for flow policy optimization (FPO)
 
-                ratios = softclamp(old_loss.detach() - loss).exp()
+                orig_loss_diff = old_loss.detach() - loss
+                clamped_loss_diff = orig_loss_diff.clamp(-clamp_value, clamp_value)
+
+                loss_diff = orig_loss_diff + (clamped_loss_diff - orig_loss_diff).detach()
+
+                ratios = loss_diff.exp()
 
                 advantages = normalize(returns - scalar_old_values.detach()) + self.advantage_offset_constant
 
                 advantages = advantages[..., None]
 
-                # SPO - Xie et al. https://arxiv.org/abs/2401.16025v9
+                advantages = repeat(advantages, 'b ... -> (b n) ...', n = n_mc)
 
-                policy_loss = ratios * advantages - (ratios - 1.).square() * advantages.abs() / (2 * self.eps_clip)
+                # SPO - Xie et al. https://arxiv.org/abs/2401.16025v9
+                # Asymmetric SPO https://openreview.net/forum?id=BA6n0nmagi
+
+                spo_policy_loss = ratios * advantages - (ratios - 1.).square() * advantages.abs() / (2 * self.eps_clip)
+
+                ppo_policy_loss = torch.min(ratios * advantages, ratios.clamp(1. - eps_clip, 1. + eps_clip) * advantages)
+
+                policy_loss = torch.where(advantages > 0., ppo_policy_loss, spo_policy_loss)
 
                 policy_loss = -policy_loss.sum(dim = -1).mean()
 
@@ -514,13 +476,6 @@ class PPO(Module):
 
             pbar.set_description(f'actor loss: {policy_loss.item():.3f} | critic loss: {critic_loss.item():.3f}')
             pbar.update(1)
-
-        # update the state normalization with rsmnorm for 1 epoch after actor critic are updated
-
-        self.rsmnorm.train()
-
-        for states, *_ in dl:
-            self.rsmnorm(states)
 
 # main
 
@@ -629,7 +584,7 @@ def main(
 
             reward = float(reward)
 
-            memory = Memory(True, state, action, noise, reward, terminated, value)
+            memory = Memory(True, state, action, reward, terminated, value)
 
             memories.append(memory)
 

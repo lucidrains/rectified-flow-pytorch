@@ -247,3 +247,14 @@ $ python train_oxford.py
     url     = {https://arxiv.org/abs/2406.04081}, 
 }
 ```
+
+```bibtex
+@inproceedings{anonymous2025flow,
+    title   = {Flow Policy Gradients for Legged Robots},
+    author  = {Anonymous},
+    booktitle = {Submitted to The Fourteenth International Conference on Learning Representations},
+    year    = {2025},
+    url     = {https://openreview.net/forum?id=BA6n0nmagi},
+    note    = {under review}
+}
+```

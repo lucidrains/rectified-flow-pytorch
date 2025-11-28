@@ -25,7 +25,8 @@ class NanoFlow(Module):
         normalize_data_fn = identity,
         unnormalize_data_fn = identity,
         predict_clean = False,
-        max_timesteps = 100
+        max_timesteps = 100,
+        loss_fn = F.mse_loss
     ):
         super().__init__()
         self.model = model
@@ -37,6 +38,8 @@ class NanoFlow(Module):
 
         self.predict_clean = predict_clean # predicting x0
         self.max_timesteps = max_timesteps
+
+        self.loss_fn = loss_fn
 
     @torch.no_grad()
     def sample(
@@ -109,7 +112,7 @@ class NanoFlow(Module):
         else:
             pred_flow = model_output
 
-        return F.mse_loss(flow, pred_flow, reduction = loss_reduction)
+        return self.loss_fn(flow, pred_flow, reduction = loss_reduction)
 
 # quick test
 
