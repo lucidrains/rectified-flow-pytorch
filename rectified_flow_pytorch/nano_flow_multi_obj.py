@@ -53,7 +53,7 @@ class NanoFlow(Module):
         self,
         batch_size = 1,
         *,
-        steps_config: tuple[tuple[int, str], ...] = (('clean', 4), ('flow', 8), ('noise', 4)), # say 4 steps of clean, 8 velocity, then 4 noise at the end
+        steps_config: tuple[tuple[str, int], ...] = (('clean', 4), ('flow', 8), ('noise', 4)), # say 4 steps of clean, 8 velocity, then 4 noise at the end
         data_shape = None,
         return_noise = False,
         **kwargs
