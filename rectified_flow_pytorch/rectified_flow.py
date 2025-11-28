@@ -731,7 +731,8 @@ class Unet(Module):
         flash_attn = False,
         num_residual_streams = 2,
         accept_cond = False,
-        dim_cond = None
+        dim_cond = None,
+        num_outputs = 1
     ):
         super().__init__()
 
@@ -842,6 +843,11 @@ class Unet(Module):
         self.out_dim = default(out_dim, default_out_dim)
 
         self.final_res_block = Residual(branch = resnet_block(init_dim * 2, init_dim), residual_transform = res_conv(init_dim * 2, init_dim))
+
+        # handle output
+        # can predict multiple output, for testing multiple objectives
+
+        self.num_outputs = num_outputs
         self.final_conv = nn.Conv2d(init_dim, self.out_dim, 1)
 
     @property
@@ -904,14 +910,25 @@ class Unet(Module):
 
         out = self.final_conv(x)
 
-        if not self.mean_variance_net:
-            return out
+        # handle output - perhaps probabilistic
 
-        mean, log_var = rearrange(out, 'b (c mean_log_var) h w -> mean_log_var b c h w', mean_log_var = 2)
+        multi_output = self.num_outputs > 1
 
-        std = (0.5 * log_var).exp()
+        if multi_output:
+            out = rearrange(out, 'b (outputs c) ... -> (outputs b) c ...', outputs = self.num_outputs)
 
-        return stack((mean, std))
+        if self.mean_variance_net:
+
+            mean, log_var = rearrange(out, 'b (c mean_log_var) h w -> mean_log_var b c h w', mean_log_var = 2)
+
+            std = (0.5 * log_var).exp()
+
+            out = stack((mean, std))
+
+        if multi_output:
+            out = rearrange(out, '(outputs b) ... -> outputs b ...', outputs = self.num_outputs)
+
+        return out
 
 # dataset classes
 
