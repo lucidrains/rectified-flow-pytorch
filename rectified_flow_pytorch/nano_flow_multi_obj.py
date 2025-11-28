@@ -94,7 +94,9 @@ class NanoFlow(Module):
             time = time.expand(batch_size)
             time_kwarg = {self.times_cond_kwarg: time} if exists(self.times_cond_kwarg) else dict()
 
-            pred_flow, pred_clean, pred_noise = self.model(denoised, **time_kwarg, **kwargs)
+            model_output = self.model(denoised, **time_kwarg, **kwargs)
+
+            pred_flow, pred_clean, pred_noise = model_output.unbind(dim = 1)
 
             padded_times = append_dims(time, denoised.ndim - 1)
 
@@ -119,9 +121,8 @@ class NanoFlow(Module):
 
         # shapes and variables
 
-        shape, ndim = data.shape, data.ndim
-        self.data_shape = default(self.data_shape, shape[1:]) # store last data shape for inference
-        batch, device = shape[0], data.device
+        batch, *data_shape, ndim, device = *data.shape, data.ndim, data.device
+        self.data_shape = default(self.data_shape, data_shape) # store last data shape for inference
 
         # flow logic
 
@@ -136,9 +137,9 @@ class NanoFlow(Module):
         time_kwarg = {self.times_cond_kwarg: times} if exists(self.times_cond_kwarg) else dict() # maybe time conditioning, could work without it (https://arxiv.org/abs/2502.13129v1)
         model_output = self.model(noised_data, **time_kwarg, **kwargs)
 
-        assert model_output.shape == (3, *shape)
+        assert model_output.shape == (batch, 3, *data_shape), 'expect the output to be (batch, 3, *data)'
 
-        pred_flow, pred_clean, pred_noise = model_output
+        pred_flow, pred_clean, pred_noise = model_output.unbind(dim = 1)
 
         pred_clean_flow = (pred_clean - noised_data) / (1. - padded_times).clamp_min(self.eps)
 
@@ -166,7 +167,7 @@ if __name__ == '__main__':
     from torch import nn
     from einops.layers.torch import Rearrange
 
-    model = nn.Sequential(nn.Conv2d(3, 3 * 3, 1), Rearrange('b (o c) ... -> o b c ...', o = 3))
+    model = nn.Sequential(nn.Conv2d(3, 3 * 3, 1), Rearrange('b (o c) ... -> b o c ...', o = 3))
 
     nano_flow = NanoFlow(model)
     data = torch.randn(16, 3, 16, 16)

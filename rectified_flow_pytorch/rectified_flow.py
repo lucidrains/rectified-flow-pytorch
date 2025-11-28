@@ -915,7 +915,7 @@ class Unet(Module):
         multi_output = self.num_outputs > 1
 
         if multi_output:
-            out = rearrange(out, 'b (outputs c) ... -> (outputs b) c ...', outputs = self.num_outputs)
+            out = rearrange(out, 'b (outputs c) ... -> (b outputs) c ...', outputs = self.num_outputs)
 
         if self.mean_variance_net:
 
@@ -926,7 +926,7 @@ class Unet(Module):
             out = stack((mean, std))
 
         if multi_output:
-            out = rearrange(out, '(outputs b) ... -> outputs b ...', outputs = self.num_outputs)
+            out = rearrange(out, '(b outputs) ... -> b outputs ...', outputs = self.num_outputs)
 
         return out
 
