@@ -48,6 +48,7 @@ model = Unet(
 soflow = SoFlow(
     model,
     lambda_flow_matching = 0.75,
+    model_output_clean = True,
     normalize_data_fn = lambda t: t * 2. - 1.,
     unnormalize_data_fn = lambda t: (t + 1.) / 2.,
     use_adaptive_loss_weight = True,

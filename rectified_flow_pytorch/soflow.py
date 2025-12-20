@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from contextlib import nullcontext
 
 import torch
@@ -7,50 +9,51 @@ import torch.nn.functional as F
 
 from einops import reduce
 
+# functions
 
 def exists(v):
     return v is not None
 
-
 def xnor(x, y):
     return not (x ^ y)
-
 
 def default(v, d):
     return v if exists(v) else d
 
-
 def identity(t):
     return t
 
-
 def divisible_by(num, den):
     return (num % den) == 0
-
 
 def append_dims(t, dims):
     shape = t.shape
     ones_shape = (1,) * dims
     return t.reshape(*shape, *ones_shape)
 
+# soflow
+
+# Luo et al of Princeton - https://arxiv.org/abs/2512.15657
+# https://github.com/zlab-princeton/SoFlow
 
 class SoFlow(Module):
     def __init__(
         self,
         model: Module,
         *,
-        data_shape=None,
-        normalize_data_fn=identity,
-        unnormalize_data_fn=identity,
-        use_adaptive_loss_weight=True,
-        adaptive_loss_weight_p=0.5,
-        use_logit_normal_sampler=True,
-        logit_normal_mean_fm=0.2,
-        logit_normal_std_fm=0.8,
-        logit_normal_mean_t=0.2,
-        logit_normal_std_t=0.8,
-        logit_normal_mean_s=-1.0,
-        logit_normal_std_s=0.8,
+        data_shape = None,
+        normalize_data_fn = identity,
+        unnormalize_data_fn = identity,
+        use_adaptive_loss_weight = True,
+        adaptive_loss_weight_p = 0.5,
+        use_logit_normal_sampler = True,
+        logit_normal_mean_fm = 0.2,
+        logit_normal_std_fm = 0.8,
+        logit_normal_mean_t = 0.2,
+        logit_normal_std_t = 0.8,
+        logit_normal_mean_s = -1.0,
+        logit_normal_std_s = 0.8,
+        model_output_clean = False, # Back to Basics paper
         r_schedule: str = "exponential",
         r_init: float = 0.1,
         r_end: float = 0.002,
@@ -94,6 +97,8 @@ class SoFlow(Module):
 
         self.noise_std_dev = noise_std_dev
         self.accept_cond = accept_cond
+
+        self.model_output_clean = model_output_clean
 
         self.register_buffer("dummy", tensor(0), persistent=False)
 
@@ -143,9 +148,21 @@ class SoFlow(Module):
         return float(math.exp(log_start + ratio * (log_end - log_start)))
 
     def predict_velocity(self, x, times, target_times, cond=None):
+        cond_kwargs = dict()
         if self.accept_cond:
-            return self.model(x, times, s=target_times, cond=cond)
-        return self.model(x, times, s=target_times)
+            cond_kwargs.update(cond=cond)
+
+        model_output = self.model(x, times, s=target_times, **cond_kwargs)
+
+        # if model outputs clean, derive velocity
+
+        if not self.model_output_clean:
+            velocity = model_output
+        else:
+            times = append_dims(times, model_output.ndim - 1)
+            velocity = (model_output - x) / times.clamp_min(self.eps)
+
+        return velocity
 
     def solution(self, x, times, target_times, cond=None, detach_model: bool = False):
         """Compute the Euler-parameterized solution f_θ(x_t, t, s) = x_t + (s - t) * F_θ(x_t, t, s)."""
@@ -345,9 +362,9 @@ class SoFlowTrainer(Module):
         flow_model: dict | SoFlow,
         *,
         dataset: dict | Dataset,
-        num_train_steps=70_000,
-        learning_rate=3e-4,
-        batch_size=16,
+        num_train_steps = 70_000,
+        learning_rate = 3e-4,
+        batch_size =16,
         checkpoints_folder: str = "./checkpoints",
         results_folder: str = "./results",
         save_results_every: int = 100,
@@ -357,8 +374,8 @@ class SoFlowTrainer(Module):
         accelerate_kwargs: dict = dict(),
         ema_kwargs: dict = dict(),
         dl_kwargs: dict = dict(),
-        use_ema=True,
-        max_grad_norm=0.5,
+        use_ema = True,
+        max_grad_norm = 0.5,
     ):
         super().__init__()
         self.accelerator = Accelerator(**accelerate_kwargs)
@@ -464,7 +481,7 @@ class SoFlowTrainer(Module):
 
             loss, (flow_loss, scm_loss) = self.model(data, return_loss_breakdown=True)
 
-            if step % 10 == 0:
+            if divisible_by(step, 10):
                 pbar.set_postfix({"loss": f"{loss.item():.3f}, flow: {flow_loss.item():.3f}, scm: {scm_loss.item():.3f}"})
 
             self.accelerator.backward(loss)
