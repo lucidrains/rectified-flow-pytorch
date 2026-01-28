@@ -4,6 +4,7 @@ import torch
 from torch import tensor
 from torch.nn import Module
 import torch.nn.functional as F
+from torch.optim import Optimizer, SGD
 
 # functions
 
@@ -64,8 +65,8 @@ class EquilibriumMatching(Module):
         batch_size = 1,
         data_shape = None,
         return_noise = False,
-        step_size = 0.003,    # step size for gradient descent
-        momentum = 0.35,      # momentum
+        optim: type[Optimizer] = SGD, # their best performing used sgd with momentum on truncated decay
+        optim_kwargs: dict = dict(lr = 0.003, momentum = 0.35, nesterov = True),
         **kwargs
     ):
         data_shape = default(data_shape, self.data_shape)
@@ -74,17 +75,14 @@ class EquilibriumMatching(Module):
 
         noise = torch.randn((batch_size, *data_shape), device = device)
         x = noise
-        v = torch.zeros_like(x)
 
-        # EqM sampling with Nesterov Accelerated Gradient
+        optimizer = optim([x], **optim_kwargs)
 
         for _ in range(steps):
-            x_lookahead = x + momentum * v
-
-            grad = self.model(x_lookahead, **kwargs)
-
-            v = momentum * v - step_size * grad
-            x = x + v
+            optimizer.zero_grad()
+            grad = self.model(x, **kwargs)
+            x.grad = grad
+            optimizer.step()
 
         out = self.unnormalize_data_fn(x)
 
