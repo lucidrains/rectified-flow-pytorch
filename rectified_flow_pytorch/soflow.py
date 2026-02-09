@@ -431,9 +431,11 @@ class SoFlowTrainer(Module):
 
         save_package = dict(
             model=self.accelerator.unwrap_model(self.model).state_dict(),
-            ema_model=self.ema_model.state_dict(),
             optimizer=self.optimizer.state_dict(),
         )
+
+        if self.use_ema:
+            save_package["ema_model"] = self.ema_model.state_dict()
 
         torch.save(save_package, str(self.checkpoints_folder / path))
 
@@ -444,7 +446,8 @@ class SoFlowTrainer(Module):
         load_package = torch.load(path)
 
         self.model.load_state_dict(load_package["model"])
-        self.ema_model.load_state_dict(load_package["ema_model"])
+        if self.use_ema and "ema_model" in load_package:
+            self.ema_model.load_state_dict(load_package["ema_model"])
         self.optimizer.load_state_dict(load_package["optimizer"])
 
     def log(self, *args, **kwargs):

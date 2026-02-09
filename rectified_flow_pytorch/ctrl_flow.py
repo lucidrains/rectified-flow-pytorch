@@ -318,10 +318,13 @@ class RectifiedFlow(Module):
         J_tau = -rewards # Energy is negative reward
         
         # Target term: exp(-J(tau)) which is exp(rewards)
-        target_energy = torch.exp(-J_tau).view(-1, 1)
+        target_energy = append_dims(torch.exp(-J_tau), data.ndim - 1)
 
         # 2. Predict Z (Normalization constant)
-        z_pred = self.z_net(x_t, times=times)
+        z_output = self.z_net(x_t, times=times)
+
+        # Strict 4D output for images
+        z_pred = reduce(z_output, 'b c h w -> b 1 1 1', 'mean')
         
         # 3. Loss L_Z
         # || Z_phi - exp(-J) ||^2
