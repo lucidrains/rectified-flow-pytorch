@@ -335,68 +335,40 @@ class RectifiedFlow(Module):
 
         projected_terminal_data = x_t + (1.0 - padded_times) * pred_flow
 
-    
         loss_control_numerator = reduce((data - projected_terminal_data) ** 2, 'b ... -> b', 'sum')
 
-        # --- Start of Denominator Calculation ---
-
-        # 1. Define a wrapper to compute velocity for a single sample
-        # required for jacrev
         def get_velocity(x, t):
-            # x: (flattened_dim)
-            # t: (scalar)
-
             t = self.noise_schedule(t)
             
-            flow = self.model(x, times=t)
+            x_in = x.unsqueeze(0) 
+            t_in = t.unsqueeze(0)
+    
+            flow = self.model(x_in, times=t_in)
             
-            # Return flattened output
-            return flow
+            return flow.flatten()
 
-        # 2. Compute Jacobian per sample in the batch using vmap + jacrev
-        # J_v shape: (batch, dim, dim)
-   
-        # We calculate dv/dx
+        # calculate dv/dx
         jacobian_fn = vmap(jacrev(get_velocity, argnums=0))
 
         J_raw = jacobian_fn(x_t, padded_times)
 
         J_v = rearrange(J_raw, 'b d ... -> b d (...)')
         
-        # 4. Construct Flow Jacobian D_Phi
-        # D_Phi = I + (1 - t) * J_v
-        
         batch_size = J_v.shape[0]
         dim = J_v.shape[-1]
-        
-        # Identity matrix repeated for batch
-        # I shape: (b, dim, dim)
+    
         I = repeat(torch.eye(dim, device=self.device), 'i j -> b i j', b=batch_size)
         
-        # Broadcast time: (b, 1) -> (b, 1, 1) for matrix math
         t_broadcast = append_dims(times, 2)
-        
+    
         D_Phi = I + (1.0 - t_broadcast) * J_v
 
-        # 5. Construct Controllability Gramian N
-        # N = D_Phi @ D_Phi.T
-        # We use einsum to multiply D_Phi by its transpose
-        
         Gramian = einsum(D_Phi, D_Phi, 'b i k, b j k -> b i j')
 
-        # 6. Compute Minimum Eigenvalue
-        # eigvalsh is stable for symmetric matrices (like Gramians)
-        # It returns eigenvalues in ascending order
-        
         eigvals = torch.linalg.eigvalsh(Gramian)
         
-        # The first column contains the smallest eigenvalues (lambda_min)
         lambda_min = eigvals[:, 0]
 
-        # 7. Final Control Loss
-        # Loss ~ Control Energy ~ Numerator / Lambda_min
-        # Add epsilon (1e-6) to prevent division by zero
-        
         loss_control = (loss_control_numerator / (lambda_min + 1e-6)).mean()
 
         total_loss = main_loss + loss_z + loss_g + loss_control
