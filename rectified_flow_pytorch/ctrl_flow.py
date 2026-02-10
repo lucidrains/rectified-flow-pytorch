@@ -16,15 +16,12 @@ from torchdiffeq import odeint
 
 import torchvision
 from torchvision.utils import save_image
-from torchvision.models import VGG16_Weights
 
 import einx
 from einops import einsum, reduce, rearrange, repeat
 from einops.layers.torch import Rearrange
+from torch.func import vmap, jacrev
 
-from hyper_connections.hyper_connections_channel_first import get_init_and_expand_reduce_stream_functions, Residual
-
-from scipy.optimize import linear_sum_assignment
 
 
 # helpers
@@ -55,7 +52,6 @@ def unnormalize_to_zero_to_one(t):
 # noise schedules
 
 def cosmap(t):
-    # Algorithm 21 in https://arxiv.org/abs/2403.03206
     return 1. - (1. / (torch.tan(pi / 2 * t) + 1))
 
 
@@ -273,6 +269,7 @@ class RectifiedFlow(Module):
 
         self.data_shape = default(self.data_shape, data_shape)
 
+
         # x0 - gaussian noise, x1 - data
 
         noise = default(noise, torch.randn_like(data))
@@ -309,46 +306,44 @@ class RectifiedFlow(Module):
         # losses
 
         main_loss = self.loss_fn(pred_flow, target, times = times)
+
+        # guidance loss 
         
         # dummy reward for ctrl flow, just to test out the loss calculation
         rewards = torch.randn(batch, device = self.device)
 
-        # 1. Define Energy Function J(tau)
-        # Assuming rewards is the cumulative return for the trajectory
-        J_tau = -rewards # Energy is negative reward
+        J_tau = -rewards 
         
-        # Target term: exp(-J(tau)) which is exp(rewards)
+        # exp(-J(tau)) which is exp(rewards)
         target_energy = append_dims(torch.exp(-J_tau), data.ndim - 1)
-
-        # 2. Predict Z (Normalization constant)
+        
         z_output = self.z_net(x_t, times=times)
 
-        # Strict 4D output for images
-        z_pred = reduce(z_output, 'b c h w -> b 1 1 1', 'mean')
+        z_pred_flat = reduce(z_output, 'b ... -> b', 'mean')
+        z_pred = append_dims(z_pred_flat, z_output.ndim - 1)
         
-        # 3. Loss L_Z
-        # || Z_phi - exp(-J) ||^2
-        loss_z = F.mse_loss(z_pred, target_energy)
-
-        # 4. Calculate Weight for Guidance
-        # w = exp(-J) / Z_pred
-        # Detach z_pred to stop gradients flowing back into z_net from L_G
         weight = target_energy / (z_pred.detach().clamp(min=1e-6))
         
-        # 5. Predict Guidance Field G
         g_pred = self.guidance_net(x_t, times=times)
         
-        # 6. Loss L_G
-        # || G - (w - 1) * v ||^2
-        # The paper says G should align with (w-1)v
         target_guidance = (weight - 1) * pred_flow.detach()
+
+        loss_z = F.mse_loss(z_pred, target_energy)
         loss_g = F.mse_loss(g_pred, target_guidance)
 
-        total_loss = main_loss 
+       # control loss
+
+        projected_terminal_data = x_t + (1.0 - padded_times) * pred_flow
+
+        trajectory_diff = data - projected_terminal_data
+
+        loss_control_numerator = reduce(trajectory_diff ** 2, 'b ... -> b', 'sum').mean()
+
+        
+
+        total_loss = main_loss + loss_z + loss_g + loss_control
 
         if not return_loss_breakdown:
             return total_loss
-
-        # loss breakdown
 
         return total_loss, LossBreakdown(total_loss, main_loss)
