@@ -108,17 +108,9 @@ class RectifiedFlow(Module):
 
         self.mean_variance_net = self.model.mean_variance_net
 
-        # objective - either flow or noise (proposed by Esser / Rombach et al in SD3)
-
         self.max_timesteps = max_timesteps # when predicting clean, just make sure time never more than 1. - (1. / max_timesteps)
 
-        # automatically default to a working setting for predict epsilon
-
-        # clip_flow_during_sampling = default(clip_flow_during_sampling, predict == 'noise')
-
-        # loss fn
-
-   
+  
         loss_fn = MSELoss()
 
         self.loss_fn = loss_fn
@@ -141,15 +133,6 @@ class RectifiedFlow(Module):
         self.clip_values = clip_values
         self.clip_flow_values = clip_flow_values
 
-        # consistency flow matching
-
-        self.use_consistency = use_consistency
-        self.consistency_decay = consistency_decay
-        self.consistency_velocity_match_alpha = consistency_velocity_match_alpha
-        self.consistency_delta_time = consistency_delta_time
-        self.consistency_loss_weight = consistency_loss_weight
-
-        self.immiscible = immiscible
 
         # normalizing fn
 
@@ -186,6 +169,7 @@ class RectifiedFlow(Module):
                 times = repeat(times, '1 -> b', b = batch)
 
             model_kwargs.update(**{time_kwarg: times})
+
 
         output = self.model(noised, **model_kwargs)
 
@@ -270,16 +254,9 @@ class RectifiedFlow(Module):
         self.data_shape = default(self.data_shape, data_shape)
 
 
-        # x0 - gaussian noise, x1 - data
-
         noise = default(noise, torch.randn_like(data))
 
-        # times, and times with dimension padding on right
-
         times = torch.rand(batch, device = self.device)
-
-        # maybe cap times when predicting clean
-
 
         padded_times = append_dims(times, data.ndim - 1)
 
@@ -296,14 +273,11 @@ class RectifiedFlow(Module):
 
             pred_flow  = self.predict_flow(model, noised, times = t, **model_kwargs)
 
-            return pred_flow, flow, noised
+            return pred_flow, flow, noised, t
 
-        # getting flow and pred flow for main model
 
-        pred_flow, target, x_t = get_noised_and_flows(self.model, padded_times)
-        # determine target, depending on objective
+        pred_flow, target, x_t, padded_times = get_noised_and_flows(self.model, padded_times)
 
-        # losses
 
         main_loss = self.loss_fn(pred_flow, target, times = times)
 
@@ -316,6 +290,8 @@ class RectifiedFlow(Module):
         
         # exp(-J(tau)) which is exp(rewards)
         target_energy = append_dims(torch.exp(-J_tau), data.ndim - 1)
+
+        times = rearrange(padded_times, '... -> (...)')
         
         z_output = self.z_net(x_t, times=times)
 
@@ -331,47 +307,8 @@ class RectifiedFlow(Module):
         loss_z = F.mse_loss(z_pred, target_energy)
         loss_g = F.mse_loss(g_pred, target_guidance)
 
-       # control loss
-
-        projected_terminal_data = x_t + (1.0 - padded_times) * pred_flow
-
-        loss_control_numerator = reduce((data - projected_terminal_data) ** 2, 'b ... -> b', 'sum')
-
-        def get_velocity(x, t):
-            t = self.noise_schedule(t)
-            
-            x_in = x.unsqueeze(0) 
-            t_in = t.unsqueeze(0)
     
-            flow = self.model(x_in, times=t_in)
-            
-            return flow.flatten()
-
-        # calculate dv/dx
-        jacobian_fn = vmap(jacrev(get_velocity, argnums=0))
-
-        J_raw = jacobian_fn(x_t, padded_times)
-
-        J_v = rearrange(J_raw, 'b d ... -> b d (...)')
-        
-        batch_size = J_v.shape[0]
-        dim = J_v.shape[-1]
-    
-        I = repeat(torch.eye(dim, device=self.device), 'i j -> b i j', b=batch_size)
-        
-        t_broadcast = append_dims(times, 2)
-    
-        D_Phi = I + (1.0 - t_broadcast) * J_v
-
-        Gramian = einsum(D_Phi, D_Phi, 'b i k, b j k -> b i j')
-
-        eigvals = torch.linalg.eigvalsh(Gramian)
-        
-        lambda_min = eigvals[:, 0]
-
-        loss_control = (loss_control_numerator / (lambda_min + 1e-6)).mean()
-
-        total_loss = main_loss + loss_z + loss_g + loss_control
+        total_loss = main_loss + loss_z + loss_g 
 
         if not return_loss_breakdown:
             return total_loss
