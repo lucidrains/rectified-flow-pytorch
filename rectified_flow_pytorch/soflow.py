@@ -431,7 +431,7 @@ class SoFlowTrainer(Module):
 
         save_package = dict(
             model=self.accelerator.unwrap_model(self.model).state_dict(),
-            ema_model=self.ema_model.state_dict(),
+            ema_model=self.ema_model.ema_model.state_dict() if self.use_ema else None,
             optimizer=self.optimizer.state_dict(),
         )
 
@@ -444,7 +444,8 @@ class SoFlowTrainer(Module):
         load_package = torch.load(path)
 
         self.model.load_state_dict(load_package["model"])
-        self.ema_model.load_state_dict(load_package["ema_model"])
+        if self.use_ema and self.ema_model is not None:
+            self.ema_model.ema_model.load_state_dict(load_package["ema_model"])
         self.optimizer.load_state_dict(load_package["optimizer"])
 
     def log(self, *args, **kwargs):
