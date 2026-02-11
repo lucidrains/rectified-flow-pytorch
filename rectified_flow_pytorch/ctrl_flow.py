@@ -151,7 +151,7 @@ class RectifiedFlow(Module):
             model_kwargs.update(**{time_kwarg: times})
 
 
-        output = self.model(noised, **model_kwargs)
+        output = model(noised, **model_kwargs)
 
         return output
 
@@ -255,7 +255,7 @@ class RectifiedFlow(Module):
             return pred_flow, flow, noised, t
 
 
-        pred_flow, target, x_t, padded_times = get_noised_and_flows(self.model, padded_times)
+        pred_flow, target, noised, padded_times = get_noised_and_flows(self.model, padded_times)
 
 
         main_loss = self.loss_fn(pred_flow, target, times = times)
@@ -268,14 +268,14 @@ class RectifiedFlow(Module):
     
         target_energy = append_dims(torch.exp(rewards), data.ndim - 1)
         
-        z_output = self.predict_flow(self.z_net, x_t, times=padded_times, **model_kwargs)
+        z_output = self.predict_flow(self.z_net, noised, times=padded_times, **model_kwargs)
 
         z_pred_flat = reduce(z_output, 'b ... -> b', 'mean')
         z_pred = append_dims(z_pred_flat, z_output.ndim - 1)
         
         weight = target_energy / (z_pred.detach().clamp(min=1e-6))
         
-        g_pred = self.predict_flow(self.guidance_net, x_t, times=padded_times, **model_kwargs)
+        g_pred = self.predict_flow(self.guidance_net, noised, times=padded_times, **model_kwargs)
         
         target_guidance = (weight - 1) * pred_flow.detach()
 
