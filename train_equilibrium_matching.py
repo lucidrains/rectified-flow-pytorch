@@ -51,8 +51,8 @@ eqm = EquilibriumMatching(
     model,
     decay_kwargs = dict(a = 0.8),
     lambda_multiplier = 4.0,
-    sample_optim_klass = Adam,
-    sample_optim_kwargs = dict(lr = 0.003)
+    sample_optim_klass = SGD,
+    sample_optim_kwargs = dict(lr = 0.003, momentum = 0.35, nesterov = True)
 )
 
 # trainer
