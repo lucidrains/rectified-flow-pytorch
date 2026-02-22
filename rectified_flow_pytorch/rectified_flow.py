@@ -1038,11 +1038,18 @@ class Trainer(Module):
         accelerate_kwargs: dict = dict(),
         ema_kwargs: dict = dict(),
         use_ema = True,
+        grad_accum_every = 1,
         max_grad_norm = 0.5,
-        clear_results_folder = False
+        clear_results_folder = False,
+        save_sample_fn: Callable | None = None
     ):
         super().__init__()
+
+        if grad_accum_every > 1:
+            accelerate_kwargs.update(gradient_accumulation_steps = grad_accum_every)
+
         self.accelerator = Accelerator(**accelerate_kwargs)
+        self.grad_accum_every = grad_accum_every
 
         if isinstance(dataset, dict):
             dataset = ImageDataset(**dataset)
@@ -1105,6 +1112,7 @@ class Trainer(Module):
         assert self.results_folder.is_dir()
 
         self.max_grad_norm = max_grad_norm
+        self.save_sample_fn = save_sample_fn
 
     @property
     def is_main(self):
@@ -1178,10 +1186,13 @@ class Trainer(Module):
                 **additional_sample_kwargs
             )
       
-        sampled = rearrange(sampled, '(row col) c h w -> c (row h) (col w)', row = self.num_sample_rows)
         sampled.clamp_(0., 1.)
 
-        save_image(sampled, fname)
+        if exists(self.save_sample_fn):
+            self.save_sample_fn(sampled, fname)
+        else:
+            sampled = rearrange(sampled, '(row col) c h w -> c (row h) (col w)', row = self.num_sample_rows)
+            save_image(sampled, str(fname))
         return sampled
 
     def forward(self):
@@ -1193,21 +1204,24 @@ class Trainer(Module):
 
             self.model.train()
 
-            data = next(dl)
+            with self.accelerator.accumulate(self.model):
+                data = next(dl)
 
-            if self.return_loss_breakdown:
-                loss, loss_breakdown = self.model(data, return_loss_breakdown = True)
-                self.log(loss_breakdown._asdict(), step = step)
-            else:
-                loss = self.model(data)
+                if self.return_loss_breakdown:
+                    loss, loss_breakdown = self.model(data, return_loss_breakdown = True)
+                    self.log(loss_breakdown._asdict(), step = step)
+                else:
+                    loss = self.model(data)
 
-            self.accelerator.print(f'[{step}] loss: {loss.item():.3f}')
-            self.accelerator.backward(loss)
+                self.accelerator.print(f'[{step}] loss: {loss.item():.3f}')
 
-            self.accelerator.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+                self.accelerator.backward(loss)
 
-            self.optimizer.step()
-            self.optimizer.zero_grad()
+                if self.accelerator.sync_gradients:
+                    self.accelerator.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+
+                self.optimizer.step()
+                self.optimizer.zero_grad()
 
             if getattr(self.model, 'use_consistency', False):
                 self.model.ema_model.update()

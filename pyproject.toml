@@ -1,12 +1,12 @@
 [project]
 name = "rectified-flow-pytorch"
-version = "0.7.0"
+version = "0.7.1"
 description = "Rectified Flow in Pytorch"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
 ]
 readme = "README.md"
-requires-python = ">= 3.8"
+requires-python = ">= 3.10"
 license = { file = "LICENSE" }
 keywords = [
     'artificial intelligence',
@@ -32,11 +32,12 @@ dependencies = [
     'torch>=2.0',
     'torchvision',
     'torchdiffeq',
+    "rotary-embedding-torch>=0.8.9",
 ]
 
 [project.urls]
 Homepage = "https://pypi.org/project/rectified-flow-pytorch/"
-Repository = "https://github.com/lucidrains/rectified-flow-pytorch"
+Repository = "https://codeberg.org/lucidrains/rectified-flow-pytorch"
 
 [project.optional-dependencies]
 examples = [
@@ -88,6 +89,30 @@ build-backend = "hatchling.build"
 
 [tool.hatch.metadata]
 allow-direct-references = true
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/rectified_flow_pytorch",
+    "/pyproject.toml",
+    "/LICENSE",
+    "/README.md"
+]
+
+exclude = [
+    "/tests",
+    "/*test*.py",
+    "/.gitignore"
+]
+
+[tool.hatch.build]
+exclude = [
+  "/*.py",
+  "/tests",
+  "/.gitignore",
+  "/*.sh",
+  "/*.gif",
+  "/data"
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["rectified_flow_pytorch"]
