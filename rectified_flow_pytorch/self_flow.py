@@ -59,6 +59,7 @@ class SelfFlow(Module):
         repr_loss_fn = cosine_sim_loss,
         repr_loss_weight = 1.0,
         alpha_shift = 0.5,
+        mask_ratio = 0.5,
         num_patches: int | None = None,
         student_align_layer = -2,
         teacher_align_layer = -1,
@@ -89,6 +90,7 @@ class SelfFlow(Module):
         self.repr_loss_fn = repr_loss_fn
         self.repr_loss_weight = repr_loss_weight
         self.alpha_shift = alpha_shift
+        self.mask_ratio = mask_ratio
         self.num_patches = num_patches
         self.schedule_fn = schedule_fn
         self.eps = eps
@@ -101,7 +103,9 @@ class SelfFlow(Module):
         dim = model.dim
         self.projector = nn.Sequential(
             nn.RMSNorm(dim),
-            nn.Linear(dim, dim, bias = False)
+            nn.Linear(dim, dim * 4),
+            nn.GELU(),
+            nn.Linear(dim * 4, dim)
         )
 
         self.has_repr_loss = repr_loss_weight > 0.
@@ -158,7 +162,6 @@ class SelfFlow(Module):
         self,
         data,
         noise = None,
-        times = None,
         return_loss_breakdown = False,
         **kwargs
     ):
@@ -178,17 +181,10 @@ class SelfFlow(Module):
 
         # times
 
-        if not exists(times):
-            times = self.schedule_fn(torch.rand(batch, device = device))
+        teacher_time = self.schedule_fn(torch.rand(batch, device = device))
+        student_time = self.schedule_fn(torch.rand(batch, device = device))
 
-        # times for the teacher
-
-        times_clean_teacher = times
-
-        if self.predict_clean:
-            times_clean_teacher = times * (1. - self.max_timesteps ** -1)
-
-        times_clean_teacher_padded = append_dims(times_clean_teacher, 2)
+        times_clean_teacher = torch.maximum(teacher_time, student_time)
 
         # noise and derive flow
 
@@ -196,24 +192,20 @@ class SelfFlow(Module):
         flow = data - noise
 
         # Dual-Timestep Scheduling (Eq. 6 & 7) adapted for 0=noise, 1=data.
-        # Student receives a degraded signal: times_clean_student = times_clean_teacher - shift
 
-        grid_coords_height, grid_coords_width = torch.meshgrid(
-            torch.linspace(0, 1, grid_height, device = device),
-            torch.linspace(0, 1, grid_width, device = device),
-            indexing = 'ij'
-        )
+        teacher_time_patch = repeat(teacher_time, 'b -> b h w', h = grid_height, w = grid_width)
+        student_time_patch = repeat(student_time, 'b -> b h w', h = grid_height, w = grid_width)
 
-        grid_coords = (grid_coords_height + grid_coords_width) / 2.
-        shift_offsets = repeat(grid_coords, 'h w -> b h w', b = batch)
+        # random mask for student
 
-        noise_shift = self.alpha_shift * torch.sin(pi * shift_offsets)
+        mask = torch.rand((batch, grid_height, grid_width), device = device) < self.mask_ratio
 
-        times_clean_student_patch = torch.clamp(
-            times_clean_teacher_padded - noise_shift,
-            min = tensor(self.eps, device = device),
-            max = times_clean_teacher_padded
-        )
+        times_clean_student_patch = torch.where(mask, student_time_patch, teacher_time_patch)
+
+        # times for the teacher
+
+        if self.predict_clean:
+            times_clean_teacher = times_clean_teacher * (1. - self.max_timesteps ** -1)
 
         # upsample times for pixel-wise lerp
 
