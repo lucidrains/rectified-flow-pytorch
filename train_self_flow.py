@@ -2,7 +2,7 @@
 # dependencies = [
 #   "accelerate",
 #   "datasets",
-#   "rectified-flow-pytorch>=0.8.0",
+#   "rectified-flow-pytorch>=0.8.1",
 #   "torchvision",
 # ]
 # ///

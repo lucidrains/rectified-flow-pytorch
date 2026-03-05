@@ -45,6 +45,11 @@ def cosine_sim_loss(x, y):
 # main class
 
 class SelfFlow(Module):
+    """
+    Chefer et al. from Black Forest Labs
+    https://bfl.ai/research/self-flow
+    """
+
     def __init__(
         self,
         model: Module,
@@ -58,7 +63,6 @@ class SelfFlow(Module):
         loss_fn = F.mse_loss,
         repr_loss_fn = cosine_sim_loss,
         repr_loss_weight = 1.0,
-        alpha_shift = 0.5,
         mask_ratio = 0.5,
         num_patches: int | None = None,
         student_align_layer = -2,
@@ -86,13 +90,11 @@ class SelfFlow(Module):
         self.predict_clean = predict_clean
         self.max_timesteps = max_timesteps
 
-        self.loss_fn = loss_fn
-        self.repr_loss_fn = repr_loss_fn
-        self.repr_loss_weight = repr_loss_weight
-        self.alpha_shift = alpha_shift
         self.mask_ratio = mask_ratio
         self.num_patches = num_patches
+
         self.schedule_fn = schedule_fn
+
         self.eps = eps
 
         self.student_align_layer = student_align_layer
@@ -109,6 +111,11 @@ class SelfFlow(Module):
         )
 
         self.has_repr_loss = repr_loss_weight > 0.
+
+        self.loss_fn = loss_fn
+        self.repr_loss_fn = repr_loss_fn
+        self.repr_loss_weight = repr_loss_weight
+
         self.register_buffer('zero', tensor(0.), persistent = False)
 
     def post_training_step_update(self):
