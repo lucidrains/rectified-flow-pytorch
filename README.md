@@ -214,37 +214,37 @@ $ python train_oxford.py
 
 ```bibtex
 @misc{mcallister2025flowmatchingpolicygradients,
-    title   = {Flow Matching Policy Gradients}, 
+    title   = {Flow Matching Policy Gradients},
     author  = {David McAllister and Songwei Ge and Brent Yi and Chung Min Kim and Ethan Weber and Hongsuk Choi and Haiwen Feng and Angjoo Kanazawa},
     year    = {2025},
     eprint  = {2507.21053},
     archivePrefix = {arXiv},
     primaryClass = {cs.LG},
-    url     = {https://arxiv.org/abs/2507.21053}, 
+    url     = {https://arxiv.org/abs/2507.21053},
 }
 ```
 
 ```bibtex
 @misc{li2025basicsletdenoisinggenerative,
-    title   = {Back to Basics: Let Denoising Generative Models Denoise}, 
+    title   = {Back to Basics: Let Denoising Generative Models Denoise},
     author  = {Tianhong Li and Kaiming He},
     year    = {2025},
     eprint  = {2511.13720},
     archivePrefix = {arXiv},
     primaryClass = {cs.CV},
-    url     = {https://arxiv.org/abs/2511.13720}, 
+    url     = {https://arxiv.org/abs/2511.13720},
 }
 ```
 
 ```bibtex
 @misc{clavier2024bootstrappingexpectilesreinforcementlearning,
-    title   = {Bootstrapping Expectiles in Reinforcement Learning}, 
+    title   = {Bootstrapping Expectiles in Reinforcement Learning},
     author  = {Pierre Clavier and Emmanuel Rachelson and Erwan Le Pennec and Matthieu Geist},
     year    = {2024},
     eprint  = {2406.04081},
     archivePrefix = {arXiv},
     primaryClass = {cs.LG},
-    url     = {https://arxiv.org/abs/2406.04081}, 
+    url     = {https://arxiv.org/abs/2406.04081},
 }
 ```
 
@@ -261,36 +261,46 @@ $ python train_oxford.py
 
 ```bibtex
 @misc{luo2025soflowsolutionflowmodels,
-    title   = {SoFlow: Solution Flow Models for One-Step Generative Modeling}, 
+    title   = {SoFlow: Solution Flow Models for One-Step Generative Modeling},
     author  = {Tianze Luo and Haotian Yuan and Zhuang Liu},
     year    = {2025},
     eprint  = {2512.15657},
     archivePrefix = {arXiv},
     primaryClass = {cs.LG},
-    url     = {https://arxiv.org/abs/2512.15657}, 
+    url     = {https://arxiv.org/abs/2512.15657},
 }
 ```
 
 ```bibtex
 @misc{wang2025equilibriummatchinggenerativemodeling,
-    title   = {Equilibrium Matching: Generative Modeling with Implicit Energy-Based Models}, 
+    title   = {Equilibrium Matching: Generative Modeling with Implicit Energy-Based Models},
     author  = {Runqian Wang and Yilun Du},
     year    = {2025},
     eprint  = {2510.02300},
     archivePrefix = {arXiv},
     primaryClass = {cs.LG},
-    url     = {https://arxiv.org/abs/2510.02300}, 
+    url     = {https://arxiv.org/abs/2510.02300},
 }
 ```
 
 ```bibtex
 @misc{boffi2025buildconsistencymodellearning,
-    title   = {How to build a consistency model: Learning flow maps via self-distillation}, 
+    title   = {How to build a consistency model: Learning flow maps via self-distillation},
     author  = {Nicholas M. Boffi and Michael S. Albergo and Eric Vanden-Eijnden},
     year    = {2025},
     eprint  = {2505.18825},
     archivePrefix = {arXiv},
     primaryClass = {cs.LG},
-    url     = {https://arxiv.org/abs/2505.18825}, 
+    url     = {https://arxiv.org/abs/2505.18825},
+}
+```
+
+```bibtex
+@misc{chefer2026self,
+    title   = {Self-Supervised Flow Matching for Scalable Multi-Modal Synthesis},
+    author  = {Hila Chefer and Patrick Esser and Dominik Lorenz and Dustin Podell and Vikash Raja and Vinh Tong and Antonio Torralba and Robin Rombach},
+    year    = {2026},
+    url     = {https://bfl.ai/research/self-flow},
+    note    = {Preprint}
 }
 ```

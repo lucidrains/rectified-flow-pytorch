@@ -74,7 +74,7 @@ def expectile_l2_loss(
     loss = F.mse_loss(x, target, reduction = 'none')
 
     less_than_zero = loss < 0
-    weight = (tau - less_than_zero.float()) 
+    weight = (tau - less_than_zero.float())
 
     return (weight * loss).mean()
 

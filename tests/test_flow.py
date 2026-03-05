@@ -69,40 +69,40 @@ def test_split_mean_flow(
         def __init__(self):
             super().__init__()
             self.net = nn.Conv2d(3, 3, 1)
-        
+
         def forward(self, x, t, r, cond = None):
             # r represents delta_time (t - r_start) in the implementation
             return add('b ..., b, b', self.net(x), t, r)
-    
+
     model = Unet()
-    
+
     split_mean_flow = SplitMeanFlow(
-        model, 
-        add_recon_loss = add_recon_loss, 
-        accept_cond = accept_cond, 
+        model,
+        add_recon_loss = add_recon_loss,
+        accept_cond = accept_cond,
         use_adaptive_loss_weight = use_adaptive_loss_weight,
         prob_default_flow_obj = prob_default_flow_obj
     )
-    
+
     data = torch.randn(16, 3, 16, 16)
     cond = data.clone() if accept_cond else None
-    
+
     loss = split_mean_flow(data, cond = cond)
     loss.backward()
-    
+
     for param in model.parameters():
         assert param.grad is not None
         assert not torch.isnan(param.grad).any()
-    
+
     for steps in [1, 2, 8]:
         sampled = split_mean_flow.sample(
-            batch_size = 16, 
+            batch_size = 16,
             cond = cond,
             steps = steps
         )
         assert sampled.shape == data.shape
         assert not torch.isnan(sampled).any()
-    
+
     noise = torch.randn_like(data)
     sampled_with_noise = split_mean_flow.sample(
         batch_size = 16,
@@ -110,10 +110,10 @@ def test_split_mean_flow(
         noise = noise
     )
     assert sampled_with_noise.shape == data.shape
-    
+
     if add_recon_loss:
         total_loss, (flow_loss, recon_loss) = split_mean_flow(
-            data, 
+            data,
             return_loss_breakdown = True,
             cond = cond
         )

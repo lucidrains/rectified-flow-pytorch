@@ -225,30 +225,30 @@ class SplitMeanFlow(Module):
 
             # sample lambda uniformly from [0, 1]
             lambda_split = torch.rand(batch, device = device)
-            
+
             # compute s = (1 - lambda) * t + lambda * r
             split_times = (1 - lambda_split) * times + lambda_split * integral_start_times
-            
+
             # compute u(zt, s, t) - velocity from s to t
             delta_s_to_t = times - split_times
 
             with torch.no_grad():
                 u2 = self.model(noised_data, times, delta_s_to_t, *maybe_cond).detach()
-            
+
             # compute zs = zt - (t - s) * u2
             padded_delta_s_to_t = append_dims(delta_s_to_t, ndim - 1)
             noised_data_s = noised_data - padded_delta_s_to_t * u2 # detach for stop gradient
-            
+
             # compute u(zs, r, s) - velocity from r to s
             delta_r_to_s = split_times - integral_start_times
 
             with torch.no_grad():
                 u1 = self.model(noised_data_s, split_times, delta_r_to_s, *maybe_cond).detach()
-            
+
             # the algebraic consistency target: u(zt, r, t) = (1 - lambda) * u1 + lambda * u2
             lambda_split_padded = append_dims(lambda_split, ndim - 1)
             target = (1 - lambda_split_padded) * u1 + lambda_split_padded * u2
-            
+
             # predict u(zt, r, t)
             pred = self.model(noised_data, times, delta_times, *maybe_cond)
 
@@ -267,7 +267,7 @@ class SplitMeanFlow(Module):
         else:
             padded_delta_times = append_dims(delta_times, ndim - 1)
             pred_data = noised_data - pred * padded_delta_times
-            
+
         recon_loss = F.mse_loss(pred_data, data)
 
         total_loss = (

@@ -127,7 +127,7 @@ class EquilibriumMatching(Module):
         padded_decay = append_dims(decay, ndim - 1)
 
         target_grad = (noise - data) * self.lambda_multiplier * padded_decay
-        
+
         model_output = self.model(noised_data, **kwargs)
 
         return self.loss_fn(model_output, target_grad, reduction = loss_reduction)

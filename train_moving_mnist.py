@@ -56,25 +56,25 @@ class MovingMNISTDataset(Dataset):
         # Create a simple moving MNIST digit
         digit, _ = self.mnist[idx]
         digit = T.functional.to_tensor(digit) # (1, 28, 28)
-        
+
         # Random start position and velocity
         x = np.random.randint(0, self.image_size - self.digit_size)
         y = np.random.randint(0, self.image_size - self.digit_size)
         vx = np.random.randint(self.min_velocity, self.max_velocity)
         vy = np.random.randint(self.min_velocity, self.max_velocity)
-        
+
         video = torch.zeros(self.num_frames, self.image_size, self.image_size)
-        
+
         for f in range(self.num_frames):
             curr_x = int(np.clip(x + vx * f, 0, self.image_size - self.digit_size))
             curr_y = int(np.clip(y + vy * f, 0, self.image_size - self.digit_size))
-            
+
             # Draw digit
             video[f, curr_y:curr_y+self.digit_size, curr_x:curr_x+self.digit_size] = torch.maximum(
                 video[f, curr_y:curr_y+self.digit_size, curr_x:curr_x+self.digit_size],
                 digit[0]
             )
-            
+
         video = repeat(video, 'f h w -> 3 f h w')
         return video
 
@@ -98,10 +98,10 @@ class VideoSampleSaver(nn.Module):
     def forward(self, video, path):
         path = Path(path)
         gif_path = str(path.with_suffix('.gif'))
-        
+
         batch = video.shape[0]
         num_rows = int(sqrt(batch))
-        
+
         video = rearrange(video, '(row col) c f h w -> c f (row h) (col w)', row = num_rows)
 
         video_tensor_to_gif(
@@ -138,14 +138,14 @@ def main(
     )
 
     # model
-    
+
     model = VideoUnet(
         dim = dim,
         dim_mults = (1, 2, 4)
     )
-    
+
     # wrapper
-    
+
     nano_flow = NanoFlow(
         model,
         times_cond_kwarg = 'times',
@@ -155,7 +155,7 @@ def main(
     )
 
     # trainer
-    
+
     trainer = Trainer(
         nano_flow,
         dataset = dataset,

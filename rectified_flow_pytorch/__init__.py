@@ -19,3 +19,7 @@ from rectified_flow_pytorch.split_mean_flow import SplitMeanFlow
 from rectified_flow_pytorch.equilibrium_matching import EquilibriumMatching
 
 from rectified_flow_pytorch.lsd_flow import LsdFlow
+
+from rectified_flow_pytorch.fit import FiT
+
+from rectified_flow_pytorch.self_flow import SelfFlow

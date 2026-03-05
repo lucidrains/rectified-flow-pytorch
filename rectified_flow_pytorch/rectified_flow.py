@@ -27,6 +27,7 @@ from hyper_connections.hyper_connections_channel_first import get_init_and_expan
 from scipy.optimize import linear_sum_assignment
 
 from rectified_flow_pytorch.nano_flow import NanoFlow
+from rectified_flow_pytorch.self_flow import SelfFlow
 
 # helpers
 
@@ -272,6 +273,10 @@ class RectifiedFlow(Module):
         # epsilon for noise objective
 
         self.eps = eps
+
+    def post_training_step_update(self):
+        if self.use_consistency:
+            self.ema_model.update()
 
     @property
     def device(self):
@@ -1021,7 +1026,7 @@ def cycle(dl):
 class Trainer(Module):
     def __init__(
         self,
-        rectified_flow: dict | RectifiedFlow | NanoFlow,
+        rectified_flow: dict | RectifiedFlow | NanoFlow | SelfFlow,
         *,
         dataset: dict | Dataset,
         num_train_steps = 70_000,
@@ -1059,10 +1064,11 @@ class Trainer(Module):
 
         self.model = rectified_flow
 
-        # determine whether to keep track of EMA (if not using consistency FM)
+        # determine whether to keep track of EMA (if not using consistency FM or self-flow)
         # which will determine which model to use for sampling
 
         use_ema &= not getattr(self.model, 'use_consistency', False)
+        use_ema &= not isinstance(self.model, SelfFlow)
 
         self.use_ema = use_ema
         self.ema_model = None
@@ -1085,7 +1091,7 @@ class Trainer(Module):
 
         self.num_train_steps = num_train_steps
 
-        self.return_loss_breakdown = isinstance(rectified_flow, RectifiedFlow)
+        self.return_loss_breakdown = isinstance(rectified_flow, (RectifiedFlow, SelfFlow))
 
         # folders
 
@@ -1121,9 +1127,9 @@ class Trainer(Module):
     def save(self, path):
         if not self.is_main:
             return
-        
+
         unwrapped_model = self.accelerator.unwrap_model(self.model)
-        
+
         ema_state = None
 
         if exists(self.ema_model):
@@ -1145,7 +1151,7 @@ class Trainer(Module):
             return
 
         load_package = torch.load(self.checkpoints_folder / path)
-        
+
         self.model.load_state_dict(load_package["model"])
 
         # load ema
@@ -1155,10 +1161,10 @@ class Trainer(Module):
         if exists(ema_state):
             if exists(self.ema_model):
                 self.ema_model.load_state_dict(ema_state)
-            
+
             elif exists(getattr(self.model, 'ema_model', None)):
                 self.model.ema_model.load_state_dict(ema_state)
-   
+
         self.optimizer.load_state_dict(load_package["optimizer"])
 
     def log(self, *args, **kwargs):
@@ -1185,7 +1191,7 @@ class Trainer(Module):
                 data_shape = data_shape,
                 **additional_sample_kwargs
             )
-      
+
         sampled.clamp_(0., 1.)
 
         if exists(self.save_sample_fn):
@@ -1210,10 +1216,12 @@ class Trainer(Module):
                 if self.return_loss_breakdown:
                     loss, loss_breakdown = self.model(data, return_loss_breakdown = True)
                     self.log(loss_breakdown._asdict(), step = step)
+
+                    breakdown_str = ' | '.join(f'{k}: {v.item():.3f}' for k, v in loss_breakdown._asdict().items())
+                    self.accelerator.print(f'[{step}] {breakdown_str}')
                 else:
                     loss = self.model(data)
-
-                self.accelerator.print(f'[{step}] loss: {loss.item():.3f}')
+                    self.accelerator.print(f'[{step}] loss: {loss.item():.3f}')
 
                 self.accelerator.backward(loss)
 
@@ -1223,11 +1231,13 @@ class Trainer(Module):
                 self.optimizer.step()
                 self.optimizer.zero_grad()
 
-            if getattr(self.model, 'use_consistency', False):
-                self.model.ema_model.update()
+            unwrapped_model = self.accelerator.unwrap_model(self.model)
+
+            if hasattr(unwrapped_model, 'post_training_step_update'):
+                unwrapped_model.post_training_step_update()
 
             if self.is_main and self.use_ema:
-                self.ema_model.ema_model.data_shape = self.model.data_shape
+                self.ema_model.ema_model.data_shape = unwrapped_model.data_shape
                 self.ema_model.update()
 
             self.accelerator.wait_for_everyone()
