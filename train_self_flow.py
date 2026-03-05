@@ -42,7 +42,7 @@ def train(
     depth = 6,
     heads = 8,
     dim_head = 64,
-    num_train_steps = 5000,
+    num_train_steps = 50_000,
     learning_rate = 1e-4,
     batch_size = 32,
     image_size = 64,
@@ -51,7 +51,7 @@ def train(
     clear_results_folder = True,
     checkpoints_folder = './checkpoints_self_flow',
     results_folder = './results_self_flow',
-    predict_clean = True
+    predict_clean = False
 ):
     model = FiT(
         dim = dim,
