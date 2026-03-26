@@ -7,7 +7,7 @@ from typing import Literal, Callable
 
 import torch
 from torch import Tensor
-from torch import nn, pi, cat, stack, from_numpy
+from torch import nn, pi, cat, stack, from_numpy, is_tensor
 from torch.nn import Module, ModuleList
 from torch.distributions import Normal
 import torch.nn.functional as F
@@ -1217,7 +1217,7 @@ class Trainer(Module):
                     loss, loss_breakdown = self.model(data, return_loss_breakdown = True)
                     self.log(loss_breakdown._asdict(), step = step)
 
-                    breakdown_str = ' | '.join(f'{k}: {v.item():.3f}' for k, v in loss_breakdown._asdict().items())
+                    breakdown_str = ' | '.join(f'{k}: {v.item() if is_tensor(v) else v:.3f}' for k, v in loss_breakdown._asdict().items())
                     self.accelerator.print(f'[{step}] {breakdown_str}')
                 else:
                     loss = self.model(data)
