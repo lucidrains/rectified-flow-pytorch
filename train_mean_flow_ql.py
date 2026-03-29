@@ -71,12 +71,11 @@ def expectile_l2_loss(
     if tau == 0.5:
         return F.mse_loss(x, target)
 
-    loss = F.mse_loss(x, target, reduction = 'none')
+    diff = x - target
 
-    less_than_zero = loss < 0
-    weight = (tau - less_than_zero.float())
+    weight = torch.where(diff < 0, 1. - tau, tau)
 
-    return (weight * loss).mean()
+    return (weight * diff.square()).mean()
 
 # agent
 
