@@ -26,16 +26,22 @@ class TDFlow(Module):
     def __init__(
         self,
         model: Module,
+        ema_model: Module | None = None,
         long_horizon_discount_factor = 0.99,
         ema_beta = 0.99,
         ema_sampling_steps = 10, # they used 10 steps
         model_cond_kwarg_name = 'image_cond',
         time_cond_kwargs = 'times',
-        recursive_loss_weight = 1.
+        recursive_loss_weight = 1.,
+        ema_kwargs: dict = dict()
     ):
         super().__init__()
         self.model = model
-        self.ema_model = EMA(model, beta = ema_beta)
+
+        if not exists(ema_model):
+            ema_model = EMA(model, beta = ema_beta, **ema_kwargs)
+
+        self.ema_model = ema_model
 
         self.model_flow = NanoFlow(model)
         self.ema_model_flow = NanoFlow(self.ema_model)
@@ -54,6 +60,9 @@ class TDFlow(Module):
         self.recursive_loss_weight = recursive_loss_weight
 
         self.register_buffer('zero', tensor(0.), persistent = False)
+
+    def update_ema(self):
+        self.ema_model.update()
 
     def forward(
         self,
@@ -153,6 +162,8 @@ if __name__ == '__main__':
     loss = td_flow(state, next_state)
 
     loss.backward()
+
+    td_flow.update_ema()
 
     pred = td_flow(state)
     assert pred.shape == state.shape
