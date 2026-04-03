@@ -739,6 +739,7 @@ class Unet(Module):
         num_residual_streams = 2,
         accept_cond = False,
         dim_cond = None,
+        has_image_cond = False,
         accept_time = True,
         accept_dest_time = False,
         num_outputs = 1
@@ -750,7 +751,17 @@ class Unet(Module):
         self.channels = channels
 
         init_dim = default(init_dim, dim)
-        self.init_conv = nn.Conv2d(channels, init_dim, 7, padding = 3)
+
+        # maybe conditioning image
+
+        self.has_image_cond = has_image_cond
+        dim_input = channels * (2 if has_image_cond else 1)
+
+        # initial conv
+
+        self.init_conv = nn.Conv2d(dim_input, init_dim, 7, padding = 3)
+
+        # dimensions across unet
 
         dims = [init_dim, *map(lambda m: dim * m, dim_mults)]
         in_out = list(zip(dims[:-1], dims[1:]))
@@ -872,8 +883,12 @@ class Unet(Module):
     def downsample_factor(self):
         return 2 ** (len(self.downs) - 1)
 
-    def forward(self, x, times = None, s = None, cond = None):
+    def forward(self, x, times = None, s = None, cond = None, image_cond = None):
         assert all([divisible_by(d, self.downsample_factor) for d in x.shape[-2:]]), f'your input dimensions {x.shape[-2:]} need to be divisible by {self.downsample_factor}, given the unet'
+
+        if self.has_image_cond:
+            assert exists(image_cond)
+            x = cat((x, image_cond), dim = 1)
 
         x = self.init_conv(x)
 

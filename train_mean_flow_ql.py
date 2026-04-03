@@ -172,7 +172,7 @@ class Agent(Module):
 
         self.opt_actor = Adam(self.actor.parameters(), lr = lr, weight_decay = weight_decay, betas = betas)
         self.opt_critic = Adam(self.critic.parameters(), lr = lr, weight_decay = weight_decay, betas = betas)
-        
+
         self.ema_critic.add_to_optimizer_post_step_hook(self.opt_critic)
 
         if self.use_short_horizon:
@@ -219,14 +219,14 @@ class Agent(Module):
                     with torch.no_grad():
                         noise = torch.randn_like(actions)
                         next_actions = self.mean_flow_actor.sample(noise = noise, cond = next_states)
-                        
+
                         target_q_all       = self.ema_critic(next_states, next_actions)
                         target_q       = rewards.float() + (~terminal).float() * self.discount_factor * target_q_all
 
                         if self.use_short_horizon:
                             target_q_short_all = self.ema_critic_short(next_states, next_actions)
                             target_q_short = rewards.float() + (~terminal).float() * self.discount_factor_short * target_q_short_all
-                            
+
                             q_beta_target_sa = self.ema_critic_short(states, actions)
                             y_cons = q_beta_target_sa + self.discount_factor * (~terminal).float() * target_q_all - self.discount_factor_short * (~terminal).float() * target_q_short_all
 
@@ -236,13 +236,13 @@ class Agent(Module):
                     if self.use_short_horizon:
                         pred_q_short = self.critic_short(states, actions)
                         critic_short_loss = expectile_l2_loss(pred_q_short, target_q_short, tau = 0.5 - self.pessimism_strength)
-                        
+
                         cons_loss = F.mse_loss(pred_q, y_cons)
                         critic_loss = critic_loss + self.consistency_weight * cons_loss
 
                     critic_loss.backward()
                     self.opt_critic.step()
-                    
+
                     if self.use_short_horizon:
                         critic_short_loss.backward()
                         self.opt_critic_short.step()

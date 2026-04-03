@@ -304,3 +304,15 @@ $ python train_oxford.py
     note    = {Preprint}
 }
 ```
+
+```bibtex
+@misc{farebrother2025temporaldifferenceflows,
+    title   = {Temporal Difference Flows},
+    author  = {Jesse Farebrother and Matteo Pirotta and Andrea Tirinzoni and Rémi Munos and Alessandro Lazaric and Ahmed Touati},
+    year    = {2025},
+    eprint  = {2503.09817},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.LG},
+    url     = {https://arxiv.org/abs/2503.09817},
+}
+```
