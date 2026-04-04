@@ -122,14 +122,14 @@ def test_split_mean_flow(
         assert isinstance(recon_loss, torch.Tensor)
         assert torch.allclose(total_loss, flow_loss + recon_loss * split_mean_flow.recon_loss_weight)
 
-@param('cond_discount', (False, True))
-def test_td_flow(cond_discount):
+@param('horizon_consistency', (False, True))
+def test_td_flow(horizon_consistency):
     from rectified_flow_pytorch.td_flow import TDFlow
     from rectified_flow_pytorch.rectified_flow import Unet
 
-    model = Unet(32, has_image_cond = True, accept_cond = cond_discount, dim_cond = 3)
+    model = Unet(32, has_image_cond = True, accept_cond = horizon_consistency, dim_cond = 3)
 
-    td_flow = TDFlow(model, long_horizon_discount_factor = 0.5, condition_on_discount = cond_discount)
+    td_flow = TDFlow(model, discount_factor = 0.996, horizon_consistency = horizon_consistency)
 
     state = torch.randn(5, 3, 32, 32)
     next_state = torch.randn(5, 3, 32, 32)
