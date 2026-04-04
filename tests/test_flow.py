@@ -3,6 +3,7 @@ from torch import nn
 from torch.nn import Module
 
 import pytest
+param = pytest.mark.parametrize
 
 def test_nano_flow():
     from rectified_flow_pytorch.nano_flow import NanoFlow
@@ -19,9 +20,9 @@ def test_nano_flow():
     assert sampled.shape == data.shape
 
 
-@pytest.mark.parametrize('add_recon_loss', (False, True))
-@pytest.mark.parametrize('accept_cond', (False, True))
-@pytest.mark.parametrize('use_adaptive_loss_weight', (False, True))
+@param('add_recon_loss', (False, True))
+@param('accept_cond', (False, True))
+@param('use_adaptive_loss_weight', (False, True))
 def test_mean_flow(
     add_recon_loss,
     accept_cond,
@@ -52,10 +53,10 @@ def test_mean_flow(
     assert sampled.shape == data.shape
 
 
-@pytest.mark.parametrize('add_recon_loss', (False, True))
-@pytest.mark.parametrize('accept_cond', (False, True))
-@pytest.mark.parametrize('use_adaptive_loss_weight', (False, True))
-@pytest.mark.parametrize('prob_default_flow_obj', (0.0, 0.5, 1.0))  # different boundary condition probabilities
+@param('add_recon_loss', (False, True))
+@param('accept_cond', (False, True))
+@param('use_adaptive_loss_weight', (False, True))
+@param('prob_default_flow_obj', (0.0, 0.5, 1.0))  # different boundary condition probabilities
 def test_split_mean_flow(
     add_recon_loss,
     accept_cond,
@@ -120,3 +121,24 @@ def test_split_mean_flow(
         assert isinstance(flow_loss, torch.Tensor)
         assert isinstance(recon_loss, torch.Tensor)
         assert torch.allclose(total_loss, flow_loss + recon_loss * split_mean_flow.recon_loss_weight)
+
+@param('cond_discount', (False, True))
+def test_td_flow(cond_discount):
+    from rectified_flow_pytorch.td_flow import TDFlow
+    from rectified_flow_pytorch.rectified_flow import Unet
+
+    model = Unet(32, has_image_cond = True, accept_cond = cond_discount, dim_cond = 3)
+
+    td_flow = TDFlow(model, long_horizon_discount_factor = 0.5, condition_on_discount = cond_discount)
+
+    state = torch.randn(5, 3, 32, 32)
+    next_state = torch.randn(5, 3, 32, 32)
+
+    loss = td_flow(state, next_state)
+
+    loss.backward()
+
+    td_flow.update_ema()
+
+    pred = td_flow(state)
+    assert pred.shape == state.shape

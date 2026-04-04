@@ -1,4 +1,5 @@
 from __future__ import annotations
+from math import log
 
 import torch
 from torch import tensor
@@ -28,11 +29,12 @@ class TDFlow(Module):
         model: Module,
         ema_model: Module | None = None,
         long_horizon_discount_factor = 0.99,
+        bootstrap_sampling_steps = 10, # they used 10 steps
+        state_cond_kwarg_name = 'image_cond',
+        time_cond_kwarg_name = 'times',
+        discount_cond_kwarg_name = 'cond',
+        condition_on_discount = False,
         ema_beta = 0.99,
-        ema_sampling_steps = 10, # they used 10 steps
-        model_cond_kwarg_name = 'image_cond',
-        time_cond_kwargs = 'times',
-        recursive_loss_weight = 1.,
         ema_kwargs: dict = dict()
     ):
         super().__init__()
@@ -43,21 +45,22 @@ class TDFlow(Module):
 
         self.ema_model = ema_model
 
-        self.model_flow = NanoFlow(model)
-        self.ema_model_flow = NanoFlow(self.ema_model)
+        self.model_flow = NanoFlow(model, times_cond_kwarg = time_cond_kwarg_name)
+        self.ema_model_flow = NanoFlow(self.ema_model, times_cond_kwarg = time_cond_kwarg_name)
 
-        self.time_cond_kwargs = time_cond_kwargs
-        self.model_cond_kwarg_name = model_cond_kwarg_name
+        self.time_cond_kwarg_name = time_cond_kwarg_name
+        self.state_cond_kwarg_name = state_cond_kwarg_name
+        self.discount_cond_kwarg_name = discount_cond_kwarg_name
 
-        self.ema_sampling_steps = ema_sampling_steps
+        self.bootstrap_sampling_steps = bootstrap_sampling_steps
+
+        # condition on discount
+
+        self.condition_on_discount = condition_on_discount
 
         # td related
 
         self.long_horizon_discount_factor = long_horizon_discount_factor
-
-        # loss related
-
-        self.recursive_loss_weight = recursive_loss_weight
 
         self.register_buffer('zero', tensor(0.), persistent = False)
 
@@ -74,7 +77,18 @@ class TDFlow(Module):
 
         # variables
 
-        keyname, time_keyname = self.model_cond_kwarg_name, self.time_cond_kwargs
+        state_key, time_key, discount_key = self.state_cond_kwarg_name, self.time_cond_kwarg_name, self.discount_cond_kwarg_name
+
+        # construct the discount conditioning, if needed
+
+        discount_cond_kwarg = dict()
+        if self.condition_on_discount:
+            # Farebrother conditions using (γ), (1. - γ), and (-log(1. - γ))
+
+            γ = self.long_horizon_discount_factor
+
+            discount_cond = tensor([γ, 1. - γ, -log(1. - γ)], device = device)
+            discount_cond_kwarg = {discount_key: discount_cond}
 
         # if not training, sample
 
@@ -82,63 +96,49 @@ class TDFlow(Module):
 
         if not is_training:
             data_shape = state.shape[1:]
-            state_kwarg = {keyname: state}
-            return self.model_flow.sample(batch_size = batch_size, data_shape = data_shape, **state_kwarg)
+            state_kwarg = {state_key: state}
+            return self.model_flow.sample(batch_size = batch_size, data_shape = data_shape, **discount_cond_kwarg, **state_kwarg)
 
         # td flow
 
         long_gamma = self.long_horizon_discount_factor
 
-        uniform = torch.rand(batch_size, device = device)
+        # (1. - γ) do usual t -> t+1 prediction
 
-        recursive_pred = uniform < long_gamma
-        base_pred = ~recursive_pred
+        state_kwarg = {state_key: state}
 
-        # (1. - gamma) probability of the time, do usual t -> t+1 prediction
+        next_state_flow_loss = self.model_flow(next_state, **state_kwarg, **discount_cond_kwarg)
 
-        next_state_flow_loss = self.zero
-
-        if base_pred.any():
-            state_kwarg = {keyname: state[base_pred]}
-            next_state_flow_loss = self.model_flow(next_state[base_pred], **state_kwarg)
-
-        # the rest of the time, predict the prediction of the next state
+        # (γ), predict the prediction of the next state
         # Farebrother proposes only matching the velocity instead
 
-        velocity_loss = self.zero
+        data_shape = state.shape[1:]
 
-        if recursive_pred.any():
+        next_state_kwarg = {state_key: next_state}
 
-            data_shape = state.shape[1:]
+        target = self.ema_model_flow.sample(batch_size = batch_size, steps = self.bootstrap_sampling_steps, data_shape = data_shape, **next_state_kwarg, **discount_cond_kwarg)
 
-            state_kwarg = {keyname: state[recursive_pred]}
-            next_state_kwarg = {keyname: next_state[recursive_pred]}
+        times = torch.rand(batch_size, device = device)
+        time_kwargs = {time_key: times}
 
-            recursive_batch_size = recursive_pred.sum().item()
+        padded_times = append_dims(times, target.ndim - 1)
 
-            target = self.ema_model_flow.sample(batch_size = recursive_batch_size, steps = self.ema_sampling_steps, data_shape = data_shape, **next_state_kwarg)
+        noise = torch.randn_like(target)
+        noised = noise.lerp(target, padded_times)
 
-            times = torch.rand(recursive_batch_size, device = device)
-            time_kwargs = {time_keyname: times}
+        pred_flow = self.model(noised, **state_kwarg, **time_kwargs, **discount_cond_kwarg)
 
-            padded_times = append_dims(times, target.ndim - 1)
+        with torch.no_grad():
+            self.ema_model.eval()
+            target_flow = self.ema_model(noised, **next_state_kwarg, **time_kwargs, **discount_cond_kwarg)
 
-            noise = torch.randn_like(target)
-            noised = noise.lerp(target, padded_times)
-
-            pred_flow = self.model(noised, **state_kwarg, **time_kwargs)
-
-            with torch.no_grad():
-                self.ema_model.eval()
-                target_flow = self.ema_model(noised, **next_state_kwarg, **time_kwargs)
-
-            velocity_loss = F.mse_loss(pred_flow, target_flow)
+        velocity_loss = F.mse_loss(pred_flow, target_flow)
 
         # total
 
         total_loss = (
-            next_state_flow_loss * base_pred.float().mean() +
-            velocity_loss * recursive_pred.float().mean() * self.recursive_loss_weight
+            next_state_flow_loss * (1. - long_gamma) +
+            velocity_loss * long_gamma
         )
 
         if not return_loss_breakdown:
@@ -152,9 +152,9 @@ class TDFlow(Module):
 if __name__ == '__main__':
     from rectified_flow_pytorch.rectified_flow import Unet
 
-    model = Unet(32, has_image_cond = True)
+    model = Unet(32, has_image_cond = True, accept_cond = True, dim_cond = 3)
 
-    td_flow = TDFlow(model, long_horizon_discount_factor = 0.5)
+    td_flow = TDFlow(model, long_horizon_discount_factor = 0.5, condition_on_discount = True)
 
     state = torch.randn(5, 3, 32, 32)
     next_state = torch.randn(5, 3, 32, 32)
