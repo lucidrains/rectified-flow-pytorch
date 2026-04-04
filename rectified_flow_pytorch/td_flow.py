@@ -8,6 +8,8 @@ from torch.nn import Module
 import torch.nn.functional as F
 
 from ema_pytorch import EMA
+from torch_einops_utils import tree_map_tensor
+
 from rectified_flow_pytorch.nano_flow import NanoFlow, append_dims
 
 # helper functions
@@ -20,6 +22,13 @@ def default(v, d):
 
 def identity(t, *args, **kwargs):
     return t
+
+def with_eval(fn):
+    def inner(*args, **kwargs):
+        fn.eval()
+        with torch.no_grad():
+            return fn(*args, **kwargs)
+    return inner
 
 # classes
 
@@ -45,6 +54,8 @@ class TDFlow(Module):
         discount_cond_kwarg_name = 'cond',
         condition_on_discount = None,
         ema_beta = 0.99,
+        policy: Module | None = None,
+        action_cond_kwarg_name = 'action',
         ema_kwargs: dict = dict(),
         flow_kwargs: dict = dict()
     ):
@@ -64,6 +75,11 @@ class TDFlow(Module):
         self.time_cond_kwarg_name = time_cond_kwarg_name
         self.state_cond_kwarg_name = state_cond_kwarg_name
         self.discount_cond_kwarg_name = discount_cond_kwarg_name
+        self.action_cond_kwarg_name = action_cond_kwarg_name
+
+        # optional policy for sampling actions during td-hc targets
+
+        self.policy = policy
 
         self.bootstrap_sampling_steps = bootstrap_sampling_steps
 
@@ -98,8 +114,11 @@ class TDFlow(Module):
         self,
         state,
         next_state = None,
+        action = None,
         discount_factor = None,
         sample_discount_factor = None,
+        sample_fn: Callable | None = None,
+        policy_forward_kwargs: dict | None = None,
         return_loss_breakdown = False,
         is_training = None
     ):
@@ -113,7 +132,19 @@ class TDFlow(Module):
 
         # variables
 
-        state_key, time_key, discount_key = self.state_cond_kwarg_name, self.time_cond_kwarg_name, self.discount_cond_kwarg_name
+        state_key = self.state_cond_kwarg_name
+        time_key = self.time_cond_kwarg_name
+        discount_key = self.discount_cond_kwarg_name
+        action_key = self.action_cond_kwarg_name
+
+        # policy variables
+
+        policy_forward_kwargs = default(policy_forward_kwargs, dict())
+
+        if exists(action):
+            assert exists(self.policy) or exists(sample_fn), 'a policy module or `sample_fn` callable must be passed in to `TDFlow` if you wish to use action conditioning'
+
+        sample_fn = default(sample_fn, self.policy)
 
         # td variables
 
@@ -139,8 +170,11 @@ class TDFlow(Module):
 
             return {discount_key: discount_cond}
 
-        def to_state_kwarg(state):
-            return {state_key: maybe_state_normalize(state)}
+        def to_state_kwarg(state_tensor, action_tensor = None):
+            kwargs = {state_key: maybe_state_normalize(state_tensor)}
+            if exists(action_tensor):
+                kwargs[action_key] = action_tensor
+            return kwargs
 
         # construct the discount conditioning, if needed
 
@@ -152,7 +186,7 @@ class TDFlow(Module):
 
         if not is_training:
             data_shape = state.shape[1:]
-            state_kwarg = to_state_kwarg(state)
+            state_kwarg = to_state_kwarg(state, action)
             return self.model_flow.sample(batch_size = batch_size, data_shape = data_shape, **discount_cond_kwarg, **state_kwarg)
 
         # if doing horizon consistency, construct short horizon related - beta is short horizon discount factor
@@ -173,7 +207,7 @@ class TDFlow(Module):
 
         # (1. - γ) do usual t -> t+1 prediction
 
-        state_kwarg = to_state_kwarg(state)
+        state_kwarg = to_state_kwarg(state, action)
 
         next_state_flow_loss = self.model_flow(next_state, **state_kwarg, **first_discount_cond_kwarg)
 
@@ -182,7 +216,10 @@ class TDFlow(Module):
 
         data_shape = state.shape[1:]
 
-        next_state_kwarg = to_state_kwarg(next_state)
+        has_policy = exists(self.policy) or exists(sample_fn)
+
+        next_action = with_eval(sample_fn)(next_state, **policy_forward_kwargs) if has_policy else None
+        next_state_kwarg = to_state_kwarg(next_state, next_action)
 
         target = self.ema_model_flow.sample(batch_size = batch_size, steps = self.bootstrap_sampling_steps, data_shape = data_shape, **next_state_kwarg, **first_discount_cond_kwarg)
 
@@ -196,9 +233,7 @@ class TDFlow(Module):
 
         pred_flow = self.model(noised, **state_kwarg, **time_kwargs, **discount_cond_kwarg)
 
-        with torch.no_grad():
-            self.ema_model.eval()
-            target_flow = self.ema_model(noised, **next_state_kwarg, **time_kwargs, **first_discount_cond_kwarg)
+        target_flow = with_eval(self.ema_model)(noised, **next_state_kwarg, **time_kwargs, **first_discount_cond_kwarg)
 
         velocity_loss = F.mse_loss(pred_flow, target_flow)
 
@@ -218,21 +253,23 @@ class TDFlow(Module):
             noise = noise[:hc_batch_size]
             target = target[:hc_batch_size]
 
+            if exists(action):
+                action = tree_map_tensor(lambda t: t[:hc_batch_size], action)
+
             time_kwargs = {time_key: times[:hc_batch_size]}
             padded_times = padded_times[:hc_batch_size]
 
             # second jump
 
-            short_state_kwarg = to_state_kwarg(target)
+            second_action = with_eval(sample_fn)(target, **policy_forward_kwargs) if has_policy else None
+            short_state_kwarg = to_state_kwarg(target, second_action)
             second_target = self.ema_model_flow.sample(batch_size = hc_batch_size, steps = self.bootstrap_sampling_steps, data_shape = data_shape, **short_state_kwarg, **second_discount_cond_kwarg)
 
             second_noised = noise.lerp(second_target, padded_times)
 
-            with torch.no_grad():
-                self.ema_model.eval()
-                second_target_flow = self.ema_model(second_noised, **short_state_kwarg, **time_kwargs, **second_discount_cond_kwarg)
+            second_target_flow = with_eval(self.ema_model)(second_noised, **short_state_kwarg, **time_kwargs, **second_discount_cond_kwarg)
 
-            state_kwarg = to_state_kwarg(state)
+            state_kwarg = to_state_kwarg(state, action)
 
             second_pred_flow = self.model(second_noised, **state_kwarg, **time_kwargs, **second_discount_cond_kwarg)
 
@@ -262,18 +299,28 @@ class TDFlow(Module):
 if __name__ == '__main__':
     from rectified_flow_pytorch.rectified_flow import Unet
 
-    model = Unet(32, has_image_cond = True, accept_cond = True, dim_cond = 3)
+    action_embedder = torch.nn.Linear(1, 128)
 
-    td_flow = TDFlow(model, horizon_consistency = True)
+    class Policy(Module):
+        def forward(self, state):
+            batch = state.shape[0]
+            return torch.randn(batch, 1)
+
+    model = Unet(32, has_image_cond = True, accept_cond = True, dim_cond = 3, action_embedder = action_embedder)
+    policy = Policy()
+
+    td_flow = TDFlow(model, horizon_consistency = True, policy = policy)
 
     state = torch.randn(5, 3, 32, 32)
     next_state = torch.randn(5, 3, 32, 32)
 
-    loss = td_flow(state, next_state)
+    action = policy(state)
+
+    loss = td_flow(state, next_state, action = action)
 
     loss.backward()
 
     td_flow.update_ema()
 
-    pred = td_flow(state)
+    pred = td_flow(state, action = action)
     assert pred.shape == state.shape

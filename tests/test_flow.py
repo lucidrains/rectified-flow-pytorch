@@ -123,22 +123,60 @@ def test_split_mean_flow(
         assert torch.allclose(total_loss, flow_loss + recon_loss * split_mean_flow.recon_loss_weight)
 
 @param('horizon_consistency', (False, True))
-def test_td_flow(horizon_consistency):
+@param('action_conditioning', (False, True))
+def test_td_flow(
+    horizon_consistency,
+    action_conditioning
+):
     from rectified_flow_pytorch.td_flow import TDFlow
     from rectified_flow_pytorch.rectified_flow import Unet
 
-    model = Unet(32, has_image_cond = True, accept_cond = horizon_consistency, dim_cond = 3)
+    policy = None
+    action_embedder = None
 
-    td_flow = TDFlow(model, discount_factor = 0.996, horizon_consistency = horizon_consistency)
+    if action_conditioning:
+        from discrete_continuous_embed_readout import Embed
+
+        action_embedder = Embed(
+            num_discrete = 10,
+            num_continuous = 4,
+            dim = 128
+        )
+
+        class Policy(Module):
+            def forward(self, state):
+                batch = state.shape[0]
+                discrete = torch.randint(0, 10, (batch,))
+                continuous = torch.randn(batch, 4)
+                return (discrete, continuous)
+
+        policy = Policy()
+
+    model = Unet(
+        32,
+        has_image_cond = True,
+        accept_cond = horizon_consistency,
+        dim_cond = 3,
+        action_embedder = action_embedder
+    )
+
+    td_flow = TDFlow(
+        model,
+        discount_factor = 0.996,
+        horizon_consistency = horizon_consistency,
+        policy = policy
+    )
 
     state = torch.randn(5, 3, 32, 32)
     next_state = torch.randn(5, 3, 32, 32)
 
-    loss = td_flow(state, next_state)
+    action = policy(state) if action_conditioning else None
+
+    loss = td_flow(state, next_state, action = action)
 
     loss.backward()
 
     td_flow.update_ema()
 
-    pred = td_flow(state)
+    pred = td_flow(state, action = action)
     assert pred.shape == state.shape

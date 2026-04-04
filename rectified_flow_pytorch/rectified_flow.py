@@ -742,6 +742,7 @@ class Unet(Module):
         has_image_cond = False,
         accept_time = True,
         accept_dest_time = False,
+        action_embedder: Module | None = None,
         num_outputs = 1
     ):
         super().__init__()
@@ -771,6 +772,8 @@ class Unet(Module):
         time_dim = dim * 4
         self.accept_time = accept_time
         self.time_mlp = None
+
+        self.action_embedder = action_embedder
 
         if accept_time:
             self.random_or_learned_sinusoidal_cond = learned_sinusoidal_cond or random_fourier_features
@@ -883,7 +886,7 @@ class Unet(Module):
     def downsample_factor(self):
         return 2 ** (len(self.downs) - 1)
 
-    def forward(self, x, times = None, s = None, cond = None, image_cond = None):
+    def forward(self, x, times = None, s = None, cond = None, image_cond = None, action = None):
         assert all([divisible_by(d, self.downsample_factor) for d in x.shape[-2:]]), f'your input dimensions {x.shape[-2:]} need to be divisible by {self.downsample_factor}, given the unet'
 
         if self.has_image_cond:
@@ -913,6 +916,13 @@ class Unet(Module):
             assert exists(self.cond_mlp), f'`accept_cond` and `dim_cond` must be set on init for `Unet`'
             c = self.cond_mlp(cond)
             t = t + c
+
+        # maybe additional action
+
+        if exists(action):
+            assert exists(self.action_embedder)
+            action_emb = self.action_embedder(action)
+            t = t + action_emb
 
         # hiddens
 
