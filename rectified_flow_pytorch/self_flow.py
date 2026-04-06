@@ -191,6 +191,13 @@ class SelfFlow(Module):
         teacher_time = self.schedule_fn(torch.rand(batch, device = device))
         student_time = self.schedule_fn(torch.rand(batch, device = device))
 
+        if self.predict_clean:
+            teacher_time = teacher_time * (1. - self.max_timesteps ** -1)
+            student_time = student_time * (1. - self.max_timesteps ** -1)
+
+        # Because t=1 is clean data and t=0 is noise in this codebase (inverted from the paper),
+        # torch.maximum correctly identifies the cleaner timestep of the two for the teacher.
+
         times_clean_teacher = torch.maximum(teacher_time, student_time)
 
         # noise and derive flow
@@ -208,11 +215,6 @@ class SelfFlow(Module):
         mask = torch.rand((batch, grid_height, grid_width), device = device) < self.mask_ratio
 
         times_clean_student_patch = torch.where(mask, student_time_patch, teacher_time_patch)
-
-        # times for the teacher
-
-        if self.predict_clean:
-            times_clean_teacher = times_clean_teacher * (1. - self.max_timesteps ** -1)
 
         # upsample times for pixel-wise lerp
 

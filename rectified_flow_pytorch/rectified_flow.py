@@ -743,7 +743,8 @@ class Unet(Module):
         accept_time = True,
         accept_dest_time = False,
         action_embedder: Module | None = None,
-        num_outputs = 1
+        num_outputs = 1,
+        dim_proj_out_from_inner: int | None = None
     ):
         super().__init__()
 
@@ -857,6 +858,13 @@ class Unet(Module):
         self.mid_attn = init_hyper_conn(dim = mid_dim, branch = FullAttention(mid_dim, heads = attn_heads[-1], dim_head = attn_dim_head[-1]))
         self.mid_block2 = init_hyper_conn(dim = mid_dim, branch = resnet_block(mid_dim, mid_dim))
 
+        self.dim_proj_out_from_inner = dim_proj_out_from_inner
+        if exists(dim_proj_out_from_inner):
+            self.to_inner_proj = nn.Sequential(
+                nn.SiLU(),
+                nn.Linear(mid_dim, dim_proj_out_from_inner)
+            )
+
         for ind, ((dim_in, dim_out), layer_full_attn, layer_attn_heads, layer_attn_dim_head) in enumerate(zip(*map(reversed, (in_out, full_attn, attn_heads, attn_dim_head)))):
             is_last = ind == (len(in_out) - 1)
 
@@ -946,6 +954,8 @@ class Unet(Module):
 
         x = self.reduce_streams(x)
 
+        inner_x = x
+
         for block1, block2, attn, upsample in self.ups:
             x = cat((x, h.pop()), dim = 1)
             x = block1(x, t)
@@ -980,7 +990,13 @@ class Unet(Module):
         if multi_output:
             out = rearrange(out, '(b outputs) ... -> b outputs ...', outputs = self.num_outputs)
 
-        return out
+        if not exists(self.dim_proj_out_from_inner):
+            return out
+
+        inner_x = reduce(inner_x, 'b d ... -> b d', 'mean')
+        inner_proj_out = self.to_inner_proj(inner_x)
+
+        return out, inner_proj_out
 
 # dataset classes
 

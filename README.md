@@ -328,3 +328,13 @@ $ python train_oxford.py
     url     = {https://arxiv.org/abs/2602.19634},
 }
 ```
+
+```bibtex
+@inproceedings{dong2026valueflows,
+    title   = {Value Flows},
+    author  = {Perry Dong and Chongyi Zheng and Chelsea Finn and Dorsa Sadigh and Benjamin Eysenbach},
+    booktitle = {International Conference on Learning Representations},
+    year    = {2026},
+    url     = {https://pd-perry.github.io/value-flows}
+}
+```
