@@ -169,10 +169,11 @@ def test_td_flow(
 
     state = torch.randn(5, 3, 32, 32)
     next_state = torch.randn(5, 3, 32, 32)
+    is_terminal = torch.tensor([False, True, False, False, True])
 
     action = policy(state) if action_conditioning else None
 
-    loss = td_flow(state, next_state, action = action)
+    loss = td_flow(state, next_state, action = action, is_terminal = is_terminal)
 
     loss.backward()
 

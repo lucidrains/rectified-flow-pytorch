@@ -23,7 +23,7 @@ from torchvision.utils import save_image, make_grid
 
 import fire
 from tqdm import tqdm
-from einops import repeat
+from einops import repeat, rearrange
 from accelerate import Accelerator
 
 from rectified_flow_pytorch.rectified_flow import Unet
@@ -69,10 +69,18 @@ class TDMovingMNISTDataset(Dataset):
             frame[py:py + self.digit_size, px:px + self.digit_size] = digit
             return repeat(frame, 'h w -> c h w', c = 3)
 
-        state = place_digit(x, y)
-        next_state = place_digit(x + vx, y + vy)
+        next_x = x + vx
+        next_y = y + vy
 
-        return state, next_state
+        is_terminal = (
+            next_x < 0 or next_x > (self.image_size - self.digit_size) or
+            next_y < 0 or next_y > (self.image_size - self.digit_size)
+        )
+
+        state = place_digit(x, y)
+        next_state = place_digit(next_x, next_y)
+
+        return state, next_state, torch.tensor(is_terminal, dtype=torch.bool)
 
 # helpers
 
@@ -98,7 +106,8 @@ def main(
     checkpoints_folder = './checkpoints_td_flow',
     image_size = 32,
     horizon_consistency = True,
-    condition_on_discount = True
+    condition_on_discount = True,
+    clamp_samples = True
 ):
     accelerator = Accelerator()
     device = accelerator.device
@@ -132,7 +141,7 @@ def main(
         model,
         horizon_consistency = horizon_consistency,
         condition_on_discount = condition_on_discount,
-        post_sample_fn = lambda t: t.clamp(0., 1.),
+        post_sample_fn = (lambda t: t.clamp(0., 1.)) if clamp_samples else (lambda t: t),
         flow_kwargs = dict(
             normalize_data_fn = lambda t: t * 2. - 1.,
             unnormalize_data_fn = lambda t: (t + 1.) / 2.
@@ -150,10 +159,10 @@ def main(
     for step in pbar:
         td_flow.train()
 
-        state, next_state = next(dl)
-        state, next_state = state.to(device), next_state.to(device)
+        state, next_state, is_terminal = next(dl)
+        state, next_state, is_terminal = state.to(device), next_state.to(device), is_terminal.to(device)
 
-        loss = td_flow(state, next_state)
+        loss = td_flow(state, next_state, is_terminal = is_terminal)
 
         accelerator.backward(loss)
         accelerator.clip_grad_norm_(td_flow.parameters(), 1.0)
@@ -170,7 +179,7 @@ def main(
             td_flow.eval()
 
             with torch.no_grad():
-                prompt_state, _ = next(dl)
+                prompt_state, _, _ = next(dl)
                 prompt_state = prompt_state[:num_sample_rows].to(device)
 
                 # for each prompt row: [prompt | sample_1 | sample_2 | ... | sample_n]
@@ -179,11 +188,12 @@ def main(
 
                 for prompt in prompt_state:
                     images.append(prompt.cpu())
-                    prompt_batch = prompt.unsqueeze(0)
+                    prompt_batch = rearrange(prompt, 'c h w -> 1 c h w')
 
                     for _ in range(num_samples):
                         sample = accelerator.unwrap_model(td_flow)(prompt_batch, is_training = False)
-                        images.append(sample.squeeze(0).clamp(0., 1.).cpu())
+                        sample = rearrange(sample, '1 c h w -> c h w')
+                        images.append(sample.clamp(0., 1.).cpu())
 
                 grid = make_grid(images, nrow = num_samples + 1, padding = 2, pad_value = 1.)
                 save_image(grid, str(results_folder / f'step_{step}.png'))
