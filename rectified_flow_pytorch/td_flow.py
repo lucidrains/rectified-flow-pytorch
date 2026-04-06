@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Callable
 from math import log
 from random import uniform
 
@@ -56,11 +57,13 @@ class TDFlow(Module):
         ema_beta = 0.99,
         policy: Module | None = None,
         action_cond_kwarg_name = 'action',
+        post_sample_fn: Callable = identity,
         ema_kwargs: dict = dict(),
         flow_kwargs: dict = dict()
     ):
         super().__init__()
         self.model = model
+        self.post_sample_fn = post_sample_fn
 
         if not exists(ema_model):
             ema_model = EMA(model, beta = ema_beta, **ema_kwargs)
@@ -125,6 +128,7 @@ class TDFlow(Module):
         batch_size, device = state.shape[0], state.device
 
         maybe_state_normalize = self.state_normalize_fn
+        maybe_clamp_fn = self.post_sample_fn
 
         horizon_consistency = self.horizon_consistency
 
@@ -218,6 +222,7 @@ class TDFlow(Module):
         next_state_kwarg = to_state_kwarg(next_state, next_action)
 
         target = self.ema_model_flow.sample(batch_size = batch_size, steps = self.bootstrap_sampling_steps, data_shape = data_shape, **next_state_kwarg, **target_discount_cond_kwarg)
+        target = maybe_clamp_fn(target)
 
         times = torch.rand(batch_size, device = device)
         time_kwargs = {time_key: times}
@@ -225,7 +230,7 @@ class TDFlow(Module):
         padded_times = append_dims(times, target.ndim - 1)
 
         noise = torch.randn_like(target)
-        noised = noise.lerp(target, padded_times)
+        noised = noise.lerp(maybe_state_normalize(target), padded_times)
 
         pred_flow = self.model(noised, **state_kwarg, **time_kwargs, **discount_cond_kwarg)
 
@@ -259,9 +264,11 @@ class TDFlow(Module):
 
             second_action = with_eval(sample_fn)(target, **policy_forward_kwargs) if has_policy else None
             short_state_kwarg = to_state_kwarg(target, second_action)
-            second_target = self.ema_model_flow.sample(batch_size = hc_batch_size, steps = self.bootstrap_sampling_steps, data_shape = data_shape, **short_state_kwarg, **discount_cond_kwarg)
 
-            second_noised = noise.lerp(second_target, padded_times)
+            second_target = self.ema_model_flow.sample(batch_size = hc_batch_size, steps = self.bootstrap_sampling_steps, data_shape = data_shape, **short_state_kwarg, **discount_cond_kwarg)
+            second_target = maybe_clamp_fn(second_target)
+
+            second_noised = noise.lerp(maybe_state_normalize(second_target), padded_times)
 
             second_target_flow = with_eval(self.ema_model)(second_noised, **short_state_kwarg, **time_kwargs, **discount_cond_kwarg)
 

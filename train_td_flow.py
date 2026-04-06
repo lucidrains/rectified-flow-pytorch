@@ -132,6 +132,7 @@ def main(
         model,
         horizon_consistency = horizon_consistency,
         condition_on_discount = condition_on_discount,
+        post_sample_fn = lambda t: t.clamp(0., 1.),
         flow_kwargs = dict(
             normalize_data_fn = lambda t: t * 2. - 1.,
             unnormalize_data_fn = lambda t: (t + 1.) / 2.
