@@ -197,11 +197,7 @@ class TDFlow(Module):
 
         # for horizon consistency, there will be a first short jump before the second long one
 
-        first_discount_cond_kwarg = discount_cond_kwarg
-
-        if horizon_consistency:
-            first_discount_cond_kwarg = short_discount_cond_kwarg
-            second_discount_cond_kwarg = discount_cond_kwarg
+        target_discount_cond_kwarg = short_discount_cond_kwarg if horizon_consistency else discount_cond_kwarg
 
         # td flow
 
@@ -209,7 +205,7 @@ class TDFlow(Module):
 
         state_kwarg = to_state_kwarg(state, action)
 
-        next_state_flow_loss = self.model_flow(next_state, **state_kwarg, **first_discount_cond_kwarg)
+        next_state_flow_loss = self.model_flow(next_state, **state_kwarg, **discount_cond_kwarg)
 
         # (γ), predict the prediction of the next state
         # Farebrother proposes only matching the velocity instead
@@ -221,7 +217,7 @@ class TDFlow(Module):
         next_action = with_eval(sample_fn)(next_state, **policy_forward_kwargs) if has_policy else None
         next_state_kwarg = to_state_kwarg(next_state, next_action)
 
-        target = self.ema_model_flow.sample(batch_size = batch_size, steps = self.bootstrap_sampling_steps, data_shape = data_shape, **next_state_kwarg, **first_discount_cond_kwarg)
+        target = self.ema_model_flow.sample(batch_size = batch_size, steps = self.bootstrap_sampling_steps, data_shape = data_shape, **next_state_kwarg, **target_discount_cond_kwarg)
 
         times = torch.rand(batch_size, device = device)
         time_kwargs = {time_key: times}
@@ -233,7 +229,7 @@ class TDFlow(Module):
 
         pred_flow = self.model(noised, **state_kwarg, **time_kwargs, **discount_cond_kwarg)
 
-        target_flow = with_eval(self.ema_model)(noised, **next_state_kwarg, **time_kwargs, **first_discount_cond_kwarg)
+        target_flow = with_eval(self.ema_model)(noised, **next_state_kwarg, **time_kwargs, **target_discount_cond_kwarg)
 
         velocity_loss = F.mse_loss(pred_flow, target_flow)
 
@@ -263,15 +259,15 @@ class TDFlow(Module):
 
             second_action = with_eval(sample_fn)(target, **policy_forward_kwargs) if has_policy else None
             short_state_kwarg = to_state_kwarg(target, second_action)
-            second_target = self.ema_model_flow.sample(batch_size = hc_batch_size, steps = self.bootstrap_sampling_steps, data_shape = data_shape, **short_state_kwarg, **second_discount_cond_kwarg)
+            second_target = self.ema_model_flow.sample(batch_size = hc_batch_size, steps = self.bootstrap_sampling_steps, data_shape = data_shape, **short_state_kwarg, **discount_cond_kwarg)
 
             second_noised = noise.lerp(second_target, padded_times)
 
-            second_target_flow = with_eval(self.ema_model)(second_noised, **short_state_kwarg, **time_kwargs, **second_discount_cond_kwarg)
+            second_target_flow = with_eval(self.ema_model)(second_noised, **short_state_kwarg, **time_kwargs, **discount_cond_kwarg)
 
             state_kwarg = to_state_kwarg(state, action)
 
-            second_pred_flow = self.model(second_noised, **state_kwarg, **time_kwargs, **second_discount_cond_kwarg)
+            second_pred_flow = self.model(second_noised, **state_kwarg, **time_kwargs, **discount_cond_kwarg)
 
             consistency_loss = F.mse_loss(second_pred_flow, second_target_flow)
 
