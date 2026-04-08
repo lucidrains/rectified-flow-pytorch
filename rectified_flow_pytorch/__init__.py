@@ -23,3 +23,5 @@ from rectified_flow_pytorch.lsd_flow import LsdFlow
 from rectified_flow_pytorch.fit import FiT
 
 from rectified_flow_pytorch.self_flow import SelfFlow
+
+from rectified_flow_pytorch.ua_flow import UAFlow

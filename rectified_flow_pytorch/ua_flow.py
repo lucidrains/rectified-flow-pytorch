@@ -32,7 +32,12 @@ class UAFlow(Module):
         ucg_scale = 0.0, # Uncertainty-Aware Classifier Guidance scale (w)
     ):
         super().__init__()
+
         self.model = model
+        
+        # get the predicted mean and log_var
+        self.model.register_forward_hook(lambda m, i, out: (out[0], 2 * torch.log(out[1].clamp(min=1e-8))))
+
         self.times_cond_kwarg = times_cond_kwarg
         self.data_shape = data_shape
 
@@ -143,39 +148,3 @@ class UAFlow(Module):
         loss = pred_var.detach() * loss
 
         return loss.mean()
-
-if __name__ == '__main__':
-    
-    class DummyUAModel(Module):
-        def __init__(self, in_channels):
-            super().__init__()
- 
-            self.net = torch.nn.Conv2d(in_channels, in_channels * 2, 1)
-
-        def forward(self, x, **kwargs):
-            out = self.net(x)
-        
-            mean, log_var = out.chunk(2, dim=1)
-            return mean, log_var
-
-    batch_size = 4
-    channels = 3
-    img_size = 16
-    
-    dummy_model = DummyUAModel(in_channels=channels)
-
-    ua_flow = UAFlow(
-        model=dummy_model, 
-        ucg_scale=10.0, 
-    )
-    
-    data = torch.randn(batch_size, channels, img_size, img_size)
-
-    loss = ua_flow(data)
-
-    loss.backward()
- 
-    denoised = ua_flow.sample(
-        batch_size=batch_size, 
-        steps=5,
-    )
