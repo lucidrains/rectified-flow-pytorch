@@ -12,6 +12,12 @@ Youtube AI Educators - <a href="https://www.youtube.com/watch?v=7NNxK3CqaDk">Yan
 
 *32 batch size, 11k steps oxford flowers*
 
+## Appreciation
+
+- [Lucas](https://github.com/lucasnewman) for the LSD flow, SoFlow, and Split Mean Flow implementations!
+
+- [Pranoy](https://github.com/pranoyr) for the Unconstrained Alignment (UA) Flow implementation, as well as various bug fixes!
+
 ## Install
 
 ```bash
