@@ -92,13 +92,20 @@ class UAFlow(Module):
                     f_unc = - (reduce(pred_var, 'b c h w -> b', 'mean')) ** 2
                     grad_x = torch.autograd.grad(f_unc.sum(), x_in)[0]
 
+                    grad_norm = torch.linalg.norm(grad_x.reshape(batch_size, -1), dim=1).view(-1, 1, 1, 1) + 1e-8
+                    grad_x = grad_x / grad_norm
+
                     b_t = (1.0 - time) / (time + 1e-5)
+                    b_t = torch.clamp(b_t, max=5.0) 
                     
                     velocity = pred_mean + b_t * self.ucg_scale * grad_x
                 else:
                     velocity = pred_mean
 
             denoised = denoised + delta * velocity
+
+        denoised = self.unnormalize_data_fn(denoised)
+        denoised = denoised.clamp(0., 1.) 
 
         return denoised
 

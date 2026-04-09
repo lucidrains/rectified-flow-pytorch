@@ -39,7 +39,7 @@ unet = Unet(dim=64, channels=CHANNELS, mean_variance_net=True)
 ua_flow = UAFlow(
     model=unet, 
     times_cond_kwarg='times',
-    ucg_scale=10.0,
+    ucg_scale=2,
     normalize_data_fn = lambda t: t * 2. - 1.,
     unnormalize_data_fn = lambda t: (t + 1.) / 2.,
 )
@@ -52,9 +52,9 @@ if __name__ == '__main__':
         dataset=dataset,
         batch_size=BATCH_SIZE,
         learning_rate=1e-4,
-        num_train_steps=10000,
+        num_train_steps=100000,
         save_results_every=500,
-        checkpoint_every=1000,   
+        checkpoint_every=20000,   
     )
 
     trainer()
