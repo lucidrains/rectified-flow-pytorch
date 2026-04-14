@@ -63,9 +63,9 @@ if __name__ == '__main__':
         dataset=dataset,
         batch_size=BATCH_SIZE,
         learning_rate=1e-4,
-        num_train_steps=1000000,
-        save_results_every=5000,
-        checkpoint_every=50000,   
+        num_train_steps=100000,
+        save_results_every=1000,
+        checkpoint_every=5000,   
     )
 
     trainer()
