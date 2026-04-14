@@ -6,7 +6,6 @@ from datasets import load_dataset
 
 from rectified_flow_pytorch import UAFlow, Trainer, Unet
 
-
 class OxfordFlowersDataset(Dataset):
     def __init__(self, image_size):
         self.ds = load_dataset('nelorth/oxford-flowers')['train']
@@ -20,12 +19,17 @@ class OxfordFlowersDataset(Dataset):
         return len(self.ds)
 
     def __getitem__(self, idx):
-        pil = self.ds[idx]['image']
+        item = self.ds[idx]
+        pil = item['image']
+        label = item['label']
+        
         tensor = self.transform(pil)
-        return tensor / 255.
+        label_tensor = torch.tensor([label], dtype=torch.float32)
+        
+        return tensor / 255., label_tensor
 
 IMG_SIZE = 64
-BATCH_SIZE = 4
+BATCH_SIZE = 32
 CHANNELS = 3
 
 is_cuda_available = torch.cuda.is_available()
@@ -33,13 +37,20 @@ device = torch.device('cuda' if is_cuda_available else 'cpu')
 
 dataset = OxfordFlowersDataset(image_size=IMG_SIZE)
 
-unet = Unet(dim=64, channels=CHANNELS, mean_variance_net=True)
+unet = Unet(
+    dim=64,
+    channels=CHANNELS, 
+    accept_cond=True,
+    dim_cond=1,
+    mean_variance_net=True
+    )
 
 
 ua_flow = UAFlow(
     model=unet, 
     times_cond_kwarg='times',
     ucg_scale=2,
+    cfg_scale=3,
     normalize_data_fn = lambda t: t * 2. - 1.,
     unnormalize_data_fn = lambda t: (t + 1.) / 2.,
 )
@@ -53,8 +64,8 @@ if __name__ == '__main__':
         batch_size=BATCH_SIZE,
         learning_rate=1e-4,
         num_train_steps=100000,
-        save_results_every=500,
-        checkpoint_every=20000,   
+        save_results_every=1000,
+        checkpoint_every=5000,   
     )
 
     trainer()

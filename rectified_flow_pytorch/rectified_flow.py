@@ -1219,9 +1219,16 @@ class Trainer(Module):
 
         dl = cycle(self.dl)
         mock_data = next(dl)
-        data_shape = mock_data.shape[1:]
 
         additional_sample_kwargs = self.sample_kwargs.copy()
+
+        # for conditioning
+        if isinstance(mock_data, (tuple, list)):
+            actual_image, label = mock_data[0], mock_data[1]
+            data_shape = actual_image.shape[1:]
+            additional_sample_kwargs['cond'] = label[:self.num_samples].flatten()
+        else:
+            data_shape = mock_data.shape[1:]
 
         if isinstance(eval_model.model, RectifiedFlow):
             additional_sample_kwargs.update(temperature = self.sample_temperature)
