@@ -29,7 +29,8 @@ class UAFlow(Module):
         normalize_data_fn = identity,
         unnormalize_data_fn = identity,
         max_timesteps = 100,
-        ucg_scale = 0.0, # Uncertainty-Aware Classifier Guidance scale (w)
+        ucg_scale = 1.0, 
+        cfg_scale = 1.0, 
     ):
         super().__init__()
 
@@ -46,6 +47,7 @@ class UAFlow(Module):
         self.max_timesteps = max_timesteps
         
         self.ucg_scale = ucg_scale
+        self.cfg_scale = cfg_scale
 
     @torch.no_grad()
     def sample(
@@ -56,6 +58,7 @@ class UAFlow(Module):
         **kwargs
     ):
         assert 1 <= steps <= self.max_timesteps
+
 
         data_shape = default(data_shape, self.data_shape)
         assert exists(data_shape), 'shape of the data must be passed in, or set at init or during training'
@@ -81,14 +84,40 @@ class UAFlow(Module):
                 x_in = denoised.detach()
                 if self.ucg_scale > 0:
                     x_in.requires_grad_(True)
-                
-                pred_mean, pred_log_var = wrapped_model(x_in)
-                pred_var = torch.exp(pred_log_var)
-                
-                # Apply Uncertainty-Aware Classifier Guidance (U-CG)
-                
+
+                # u-cf block
+                if 'cond' in kwargs and self.cfg_scale > 0.0:
+                    cond = kwargs['cond']
+                    v_cond, log_var_cond = wrapped_model(x_in)
+                    
+                    kwargs['cond'] = torch.zeros_like(cond)
+                    v_null, log_var_null = wrapped_model(x_in)
+                    kwargs['cond'] = cond
+                    
+                    # finding the closed form lambda
+                    sigma_y = torch.exp(0.5 * log_var_cond)
+                    sigma_null = torch.exp(0.5 * log_var_null)
+
+                    lambda_num = einsum(sigma_y, sigma_null - sigma_y, 'b c h w, b c h w -> b')
+                    lambda_den = reduce((sigma_y - sigma_null) ** 2, 'b c h w -> b', 'sum') + 1e-8
+
+                    lambda_opt = lambda_num / lambda_den
+
+                    lambda_star = torch.clamp(lambda_opt, min=0.0, max=self.cfg_scale)
+                    lambda_star = rearrange(lambda_star, 'b -> b 1 1 1')
+
+                    pred_mean = v_cond + lambda_star * (v_cond - v_null)
+
+                    sigma_cfg = (1.0 + lambda_star) * sigma_y - lambda_star * sigma_null
+                    pred_var = sigma_cfg ** 2
+                    
+                else:
+                    pred_mean, log_var = wrapped_model(x_in)
+                    pred_var = torch.exp(log_var)
+
+               
                 if self.ucg_scale > 0:
-                    # get gradient of uncertainty w.r.t. input
+                    # get derivative of uncertainty w.r.t. input
                     f_unc = - (reduce(pred_var, 'b c h w -> b', 'mean')) ** 2
                     grad_x = torch.autograd.grad(f_unc.sum(), x_in)[0]
 
@@ -102,6 +131,7 @@ class UAFlow(Module):
                 else:
                     velocity = pred_mean
 
+
             denoised = denoised + delta * velocity
 
         denoised = self.unnormalize_data_fn(denoised)
@@ -111,6 +141,17 @@ class UAFlow(Module):
 
             
     def forward(self, data, noise=None, times=None, **kwargs):
+
+        if isinstance(data, (tuple, list)):
+            actual_image, cond = data[0], data[1]
+            cond = cond.flatten()
+            
+            if self.training and torch.rand(1).item() < 0.1:
+                cond = torch.zeros_like(cond)
+                
+            kwargs['cond'] = cond
+            data = actual_image
+    
         data = self.normalize_data_fn(data)
 
         shape, ndim = data.shape, data.ndim
