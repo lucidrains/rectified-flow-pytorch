@@ -1,7 +1,10 @@
+from functools import partial
+
 import torch
 from torch.nn import Module
 import torch.nn.functional as F
 from einops import reduce, rearrange, einsum
+from torchdiffeq import odeint
 import einx
 
 
@@ -31,6 +34,7 @@ class UAFlow(Module):
         max_timesteps = 100,
         ucg_scale = 1.0, 
         cfg_scale = 1.0, 
+        odeint_kwargs : dict = dict(method='heun2')
     ):
         super().__init__()
 
@@ -48,6 +52,8 @@ class UAFlow(Module):
         
         self.ucg_scale = ucg_scale
         self.cfg_scale = cfg_scale
+
+        self.odeint_fn = partial(odeint, **odeint_kwargs)
 
     @torch.no_grad()
     def sample(
@@ -68,20 +74,19 @@ class UAFlow(Module):
         # TODO - implement variance propagation 
         state_variance = torch.zeros_like(noise)
 
-        times = torch.linspace(0., 1., steps + 1, device = device)[:-1]
-        delta = 1. / steps
+        times = torch.linspace(0., 1., steps + 1, device = device)
 
         denoised = noise
 
-        for time in times:
-            time_b = time.expand(batch_size)
+        def ode_fn(t, x_current):
+            time_b = t.expand(batch_size)
             time_kwarg = {self.times_cond_kwarg: time_b} if exists(self.times_cond_kwarg) else dict()
 
             def wrapped_model(x_in):
                 return self.model(x_in, **time_kwarg, **kwargs)
 
             with torch.set_grad_enabled(self.ucg_scale > 0):
-                x_in = denoised.detach()
+                x_in = x_current.detach()
                 if self.ucg_scale > 0:
                     x_in.requires_grad_(True)
 
@@ -124,7 +129,7 @@ class UAFlow(Module):
                     grad_norm = torch.linalg.norm(grad_x.reshape(batch_size, -1), dim=1).view(-1, 1, 1, 1) + 1e-8
                     grad_x = grad_x / grad_norm
 
-                    b_t = (1.0 - time) / (time + 1e-5)
+                    b_t = (1.0 - t) / (t + 1e-5)
                     b_t = torch.clamp(b_t, max=5.0) 
                     
                     velocity = pred_mean + b_t * self.ucg_scale * grad_x
@@ -132,7 +137,9 @@ class UAFlow(Module):
                     velocity = pred_mean
 
 
-            denoised = denoised + delta * velocity
+            return velocity
+
+        denoised = self.odeint_fn(ode_fn, denoised, times)[-1]
 
         denoised = self.unnormalize_data_fn(denoised)
         denoised = denoised.clamp(0., 1.) 
