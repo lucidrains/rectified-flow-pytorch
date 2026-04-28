@@ -34,6 +34,7 @@ class UAFlow(Module):
         max_timesteps = 100,
         ucg_scale = 1.0, 
         cfg_scale = 1.0, 
+        beta_nll = 1.0,
         odeint_kwargs : dict = dict(method='heun2')
     ):
         super().__init__()
@@ -52,6 +53,7 @@ class UAFlow(Module):
         
         self.ucg_scale = ucg_scale
         self.cfg_scale = cfg_scale
+        self.beta_nll = beta_nll
 
         self.odeint_fn = partial(odeint, **odeint_kwargs)
 
@@ -200,6 +202,7 @@ class UAFlow(Module):
 
         loss = ((pred_mean - flow_cond) ** 2) / (2 * pred_var) +  0.5 *  pred_log_var + (correction / (2 * pred_var))
 
-        loss = pred_var.detach() * loss
+        if self.beta_nll > 0.0:
+            loss = (pred_var.detach() ** self.beta_nll) * loss
 
         return loss.mean()
