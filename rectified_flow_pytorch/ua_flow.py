@@ -97,7 +97,7 @@ class UAFlow(Module):
                     cond = kwargs['cond']
                     v_cond, log_var_cond = wrapped_model(x_in)
                     
-                    kwargs['cond'] = torch.zeros_like(cond)
+                    kwargs['cond'] = torch.full_like(cond, -1)
                     v_null, log_var_null = wrapped_model(x_in)
                     kwargs['cond'] = cond
                     
@@ -156,7 +156,7 @@ class UAFlow(Module):
             cond = cond.flatten()
             
             if self.training and torch.rand(1).item() < 0.1:
-                cond = torch.zeros_like(cond)
+                cond = torch.full_like(cond, -1)
                 
             kwargs['cond'] = cond
             data = actual_image
