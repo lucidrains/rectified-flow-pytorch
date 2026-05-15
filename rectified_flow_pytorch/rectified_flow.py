@@ -344,6 +344,9 @@ class RectifiedFlow(Module):
         data_shape: tuple[int, ...] | None = None,
         temperature: float = 1.,
         use_ema: bool = False,
+        ref_image = None,               # Follow the mean - https://arxiv.org/abs/2605.10302
+        ref_image_guide_strength = 0.1,
+        ref_image_max_time_guide = 0.85,
         **model_kwargs
     ):
         use_ema = default(use_ema, self.use_consistency)
@@ -377,6 +380,18 @@ class RectifiedFlow(Module):
                 mean, std = output
 
                 flow = torch.normal(mean, std * temperature)
+
+            # maybe reference image guidance - eq 9
+
+            if (
+                exists(ref_image) and
+                (t < ref_image_max_time_guide)
+            ):
+                pred_image = x + flow * (1. - t)
+                delta_flow = (ref_image - pred_image) / (1. - t)
+                flow = flow + delta_flow * ref_image_guide_strength
+
+            # maybe clip
 
             flow = maybe_clip_flow(flow)
 
