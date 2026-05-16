@@ -32,15 +32,15 @@ class UAFlow(Module):
         normalize_data_fn = identity,
         unnormalize_data_fn = identity,
         max_timesteps = 100,
-        ucg_scale = 1.0, 
-        cfg_scale = 1.0, 
+        ucg_scale = 1.0,
+        cfg_scale = 1.0,
         beta_nll = 1.0,
         odeint_kwargs : dict = dict(method='heun2')
     ):
         super().__init__()
 
         self.model = model
-        
+
         # get the predicted mean and log_var
         self.model.register_forward_hook(lambda m, i, out: (out[0], 2 * torch.log(out[1].clamp(min=1e-8))))
 
@@ -50,7 +50,7 @@ class UAFlow(Module):
         self.normalize_data_fn = normalize_data_fn
         self.unnormalize_data_fn = unnormalize_data_fn
         self.max_timesteps = max_timesteps
-        
+
         self.ucg_scale = ucg_scale
         self.cfg_scale = cfg_scale
         self.beta_nll = beta_nll
@@ -73,7 +73,7 @@ class UAFlow(Module):
         device = next(self.model.parameters()).device
 
         noise = torch.randn((batch_size, *data_shape), device = device)
-        # TODO - implement variance propagation 
+        # TODO - implement variance propagation
         state_variance = torch.zeros_like(noise)
 
         times = torch.linspace(0., 1., steps + 1, device = device)
@@ -96,11 +96,11 @@ class UAFlow(Module):
                 if 'cond' in kwargs and self.cfg_scale > 0.0:
                     cond = kwargs['cond']
                     v_cond, log_var_cond = wrapped_model(x_in)
-                    
+
                     kwargs['cond'] = torch.full_like(cond, -1)
                     v_null, log_var_null = wrapped_model(x_in)
                     kwargs['cond'] = cond
-                    
+
                     # finding the closed form lambda
                     sigma_y = torch.exp(0.5 * log_var_cond)
                     sigma_null = torch.exp(0.5 * log_var_null)
@@ -117,12 +117,12 @@ class UAFlow(Module):
 
                     sigma_cfg = (1.0 + lambda_star) * sigma_y - lambda_star * sigma_null
                     pred_var = sigma_cfg ** 2
-                    
+
                 else:
                     pred_mean, log_var = wrapped_model(x_in)
                     pred_var = torch.exp(log_var)
 
-               
+
                 if self.ucg_scale > 0:
                     # get derivative of uncertainty w.r.t. input
                     f_unc = - (reduce(pred_var, 'b c h w -> b', 'mean')) ** 2
@@ -132,8 +132,8 @@ class UAFlow(Module):
                     grad_x = grad_x / grad_norm
 
                     b_t = (1.0 - t) / (t + 1e-5)
-                    b_t = torch.clamp(b_t, max=5.0) 
-                    
+                    b_t = torch.clamp(b_t, max=5.0)
+
                     velocity = pred_mean + b_t * self.ucg_scale * grad_x
                 else:
                     velocity = pred_mean
@@ -144,27 +144,27 @@ class UAFlow(Module):
         denoised = self.odeint_fn(ode_fn, denoised, times)[-1]
 
         denoised = self.unnormalize_data_fn(denoised)
-        denoised = denoised.clamp(0., 1.) 
+        denoised = denoised.clamp(0., 1.)
 
         return denoised
 
-            
+
     def forward(self, data, noise=None, times=None, **kwargs):
 
         if isinstance(data, (tuple, list)):
             actual_image, cond = data[0], data[1]
             cond = cond.flatten()
-            
+
             if self.training and torch.rand(1).item() < 0.1:
                 cond = torch.full_like(cond, -1)
-                
+
             kwargs['cond'] = cond
             data = actual_image
-    
+
         data = self.normalize_data_fn(data)
 
         shape, ndim = data.shape, data.ndim
-        self.data_shape = default(self.data_shape, shape[1:]) 
+        self.data_shape = default(self.data_shape, shape[1:])
         batch, device = shape[0], data.device
 
         times = default(times, torch.rand(batch, device=device))
@@ -172,10 +172,10 @@ class UAFlow(Module):
 
         noise = default(noise, torch.randn_like(data))
         padded_times = append_dims(times, ndim - 1)
-        noised_data = noise.lerp(data, padded_times) 
+        noised_data = noise.lerp(data, padded_times)
 
-        time_kwarg = {self.times_cond_kwarg: times} if exists(self.times_cond_kwarg) else dict() 
-        
+        time_kwarg = {self.times_cond_kwarg: times} if exists(self.times_cond_kwarg) else dict()
+
         pred_mean, pred_log_var = self.model(noised_data, **time_kwarg, **kwargs)
 
         # uncertainty-aware loss computation
@@ -184,7 +184,7 @@ class UAFlow(Module):
 
         exact_mean = einx.multiply("b, j c h w -> b j c h w", times, data)
         exact_variance = (1.0 - padded_times) ** 2 + 1e-8
-        
+
         squared_err = (einx.subtract("b c h w, b j c h w -> b j c h w", noised_data, exact_mean) ** 2) / (2 * exact_variance)
         dist = reduce(squared_err, 'b j c h w -> b j', 'sum')
 
@@ -194,7 +194,7 @@ class UAFlow(Module):
 
         u_hat = einsum(ut_cond_all, weights, "b j c h w, b j -> b c h w",)
 
-        flow_cond = data - noise 
+        flow_cond = data - noise
 
         correction = (u_hat ** 2 - flow_cond ** 2).detach()
 

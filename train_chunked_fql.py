@@ -1,32 +1,15 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
-#     "accelerate",
-#     "einops",
-#     "ema-pytorch",
-#     "fire",
-#     "gymnasium[box2d]",
-#     "numpy",
-#     "torch",
-#     "tqdm",
-#     "wandb",
-#     "torch-einops-utils",
-#     "assoc-scan",
-#     "x-transformers",
+#     "rectified-flow-pytorch[examples_ql]",
 #     "memmap-replay-buffer>=0.1.1",
-#     "x-mlps-pytorch",
-#     "torchdiffeq",
-#     "torchvision",
-#     "hyper-connections",
-#     "rotary-embedding-torch",
-#     "einx",
-#     "datasets",
-#     "adam-atan2-pytorch",
-#     "moviepy",
+#     "wandb",
 # ]
 # ///
 
-# fql - https://arxiv.org/abs/2502.02538
+# fql   - https://arxiv.org/abs/2502.02538
+# t-sac - https://arxiv.org/abs/2503.03660
+# aac   - https://arxiv.org/abs/2605.10044
 
 from __future__ import annotations
 
@@ -65,6 +48,14 @@ from rectified_flow_pytorch.nano_flow import NanoFlow
 
 def divisible_by(num, den):
     return (num % den) == 0
+
+def bernoulli(p):
+    return random.random() < p
+
+def sample_categorical(logits, low = 1):
+    probs = F.softmax(logits, dim = -1)
+    sampled = torch.multinomial(probs, 1)
+    return (sampled + 1).clamp(min = low).item()
 
 # agent networks
 
@@ -432,10 +423,13 @@ def main(
     pessimism_strength = 0.05,
     ema_decay = 0.995,
     action_chunk_size = 4,
+    dynamic_chunk = True,
+    dynamic_chunk_eps = 0.05,
+    dynamic_chunk_min_len = 1,
     update_every_episodes = 25,
     updates_per_train_step = 500,
     max_grad_norm = 1.,
-    rollout_cpu = False,
+    rollout_cpu = True,
     actor_sample_steps_at_rollout = 10,
     render = True,
     render_every_eps = 250,
@@ -488,6 +482,7 @@ def main(
     )
 
     ep_rewards_deque = deque(maxlen = 20)
+    ep_chunk_lengths_deque = deque(maxlen = 20)
 
     agent = Agent(
         accelerator,
@@ -520,6 +515,7 @@ def main(
     for eps in pbar:
 
         ep_reward = 0.
+        ep_sampled_chunk_lengths = []
         state, info = env.reset()
         state = torch.from_numpy(state).to(rollout_device)
 
@@ -529,19 +525,33 @@ def main(
             for timestep in range(max_timesteps):
                 time += 1
 
-                if random.random() < prob_rand_action:
-                    action_queue.clear()
-                    actions = torch.rand((num_actions,), device = rollout_device) * 2 - 1.
-
-                elif len(action_queue) > 0:
+                if len(action_queue) > 0:
                     actions = action_queue.popleft()
+
+                elif bernoulli(prob_rand_action):
+                    actions = torch.rand((num_actions,), device = rollout_device) * 2 - 1.
 
                 else:
                     with torch.no_grad():
                         state_b = rearrange(state, 'd -> 1 d')
                         noise = torch.randn((1, action_chunk_size, num_actions), device = rollout_device)
                         action_chunk = agent.one_step_actor(state_b, noise)
-                        action_chunk = rearrange(action_chunk, '1 s d -> s d')
+
+                        # adaptive action chunking - Shin et al. https://arxiv.org/abs/2605.10044
+
+                        if dynamic_chunk:
+                            q_values = agent.critic(state_b.to(device), action_chunk.to(device))
+                            q_values = rearrange(q_values, '1 s -> s')
+
+                            if bernoulli(dynamic_chunk_eps):
+                                chunk_len = random.randint(dynamic_chunk_min_len, action_chunk_size)
+                            else:
+                                chunk_len = sample_categorical(q_values, low = dynamic_chunk_min_len)
+                                ep_sampled_chunk_lengths.append(chunk_len)
+
+                            action_chunk = action_chunk[:, :chunk_len]
+
+                        action_chunk = rearrange(action_chunk, '1 s d -> s d').to(rollout_device)
 
                         for a in action_chunk:
                             action_queue.append(a)
@@ -584,10 +594,22 @@ def main(
 
         ep_rewards_deque.append(ep_reward)
         avg_reward = sum(ep_rewards_deque) / len(ep_rewards_deque)
-        pbar.set_postfix(avg_reward = f"{avg_reward:.2f}")
+
+        postfix_kwargs = dict(avg_reward = f"{avg_reward:.2f}")
+        log_dict = dict(avg_reward = avg_reward, episode = eps)
+
+        if len(ep_sampled_chunk_lengths) > 0:
+            ep_chunk_lengths_deque.append(sum(ep_sampled_chunk_lengths) / len(ep_sampled_chunk_lengths))
+
+        if dynamic_chunk and len(ep_chunk_lengths_deque) > 0:
+            avg_chunk_len = sum(ep_chunk_lengths_deque) / len(ep_chunk_lengths_deque)
+            postfix_kwargs.update(avg_chunk_len = f"{avg_chunk_len:.2f}")
+            log_dict.update(avg_chunk_len = avg_chunk_len)
+
+        pbar.set_postfix(**postfix_kwargs)
 
         if accelerator.is_main_process:
-            wandb.log({'avg_reward': avg_reward, 'episode': eps})
+            wandb.log(log_dict)
 
 # main
 
