@@ -57,6 +57,16 @@ def sample_categorical(logits, low = 1):
     sampled = torch.multinomial(probs, 1)
     return (sampled + 1).clamp(min = low).item()
 
+# whether to abort remaining chunk given reassessed q-values
+# modify this function for experimentation
+
+def should_abort_chunk(
+    q_values,
+    orig_q_values,
+    threshold = 0.05
+):
+    return (q_values < (orig_q_values - threshold)).any().item()
+
 # agent networks
 
 class TransformerActor(Module):
@@ -426,6 +436,8 @@ def main(
     dynamic_chunk = True,
     dynamic_chunk_eps = 0.05,
     dynamic_chunk_min_len = 1,
+    reassess_chunk = False,
+    reassess_threshold = 0.05,
     update_every_episodes = 25,
     updates_per_train_step = 500,
     max_grad_norm = 1.,
@@ -483,6 +495,7 @@ def main(
 
     ep_rewards_deque = deque(maxlen = 20)
     ep_chunk_lengths_deque = deque(maxlen = 20)
+    ep_aborts_deque = deque(maxlen = 20)
 
     agent = Agent(
         accelerator,
@@ -509,12 +522,14 @@ def main(
 
     time = 0
     action_queue = deque()
+    current_chunk_orig_q_values = None
 
     pbar = tqdm(range(num_episodes), desc = 'episodes')
 
     for eps in pbar:
 
         ep_reward = 0.
+        ep_aborts = 0
         ep_sampled_chunk_lengths = []
         state, info = env.reset()
         state = torch.from_numpy(state).to(rollout_device)
@@ -524,6 +539,24 @@ def main(
         with replay_buffer.one_episode():
             for timestep in range(max_timesteps):
                 time += 1
+
+                # closed-loop chunk reassessment
+                # re-evaluate remaining actions from current state to catch trajectory degradation
+
+                if len(action_queue) > 0 and reassess_chunk:
+                    remaining_actions = rearrange(list(action_queue), 's d -> 1 s d')
+                    state_b = rearrange(state, 'd -> 1 d')
+
+                    with torch.no_grad():
+                        q_values = agent.critic(state_b.to(device), remaining_actions.to(device))
+                        q_values = rearrange(q_values, '1 s -> s')
+
+                    rem_len = len(action_queue)
+                    matched_orig_q = current_chunk_orig_q_values[-rem_len:]
+
+                    if should_abort_chunk(q_values, matched_orig_q, reassess_threshold):
+                        action_queue.clear()
+                        ep_aborts += 1
 
                 if len(action_queue) > 0:
                     actions = action_queue.popleft()
@@ -539,10 +572,11 @@ def main(
 
                         # adaptive action chunking - Shin et al. https://arxiv.org/abs/2605.10044
 
-                        if dynamic_chunk:
+                        if dynamic_chunk or reassess_chunk:
                             q_values = agent.critic(state_b.to(device), action_chunk.to(device))
                             q_values = rearrange(q_values, '1 s -> s')
 
+                        if dynamic_chunk:
                             if bernoulli(dynamic_chunk_eps):
                                 chunk_len = random.randint(dynamic_chunk_min_len, action_chunk_size)
                             else:
@@ -551,7 +585,17 @@ def main(
 
                             action_chunk = action_chunk[:, :chunk_len]
 
+                            # cache predicted future returns for matching
+
+                            if reassess_chunk:
+                                current_chunk_orig_q_values = q_values[:chunk_len]
+
+                        elif reassess_chunk:
+                            current_chunk_orig_q_values = q_values
+
                         action_chunk = rearrange(action_chunk, '1 s d -> s d').to(rollout_device)
+
+                        # queue actions
 
                         for a in action_chunk:
                             action_queue.append(a)
@@ -562,14 +606,14 @@ def main(
                 next_state, reward, terminated, truncated, _ = env.step(actions.tolist())
 
                 ep_reward += reward
-                reward /= max_reward
+                scaled_reward = reward / max_reward
 
                 next_state = torch.from_numpy(next_state).to(rollout_device)
 
                 replay_buffer.store(
                     state = state,
                     action = actions,
-                    reward = tensor(reward),
+                    reward = tensor(scaled_reward),
                     terminal = tensor(terminated),
                     next_state = next_state
                 )
@@ -605,6 +649,12 @@ def main(
             avg_chunk_len = sum(ep_chunk_lengths_deque) / len(ep_chunk_lengths_deque)
             postfix_kwargs.update(avg_chunk_len = f"{avg_chunk_len:.2f}")
             log_dict.update(avg_chunk_len = avg_chunk_len)
+
+        if reassess_chunk:
+            ep_aborts_deque.append(ep_aborts)
+            avg_aborts = sum(ep_aborts_deque) / len(ep_aborts_deque)
+            postfix_kwargs.update(avg_aborts = f"{avg_aborts:.1f}")
+            log_dict.update(avg_aborts = avg_aborts)
 
         pbar.set_postfix(**postfix_kwargs)
 
