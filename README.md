@@ -344,3 +344,27 @@ $ python train_oxford.py
     url     = {https://pd-perry.github.io/value-flows}
 }
 ```
+
+```bibtex
+@misc{curvo2026followmeanreferenceguidedflow,
+    title   = {Follow the Mean: Reference-Guided Flow Matching},
+    author  = {Pedro M. P. Curvo and Maksim Zhdanov and Floor Eijkelboom and Jan-Willem van de Meent},
+    year    = {2026},
+    eprint  = {2605.10302},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.LG},
+    url     = {https://arxiv.org/abs/2605.10302},
+}
+```
+
+```bibtex
+@misc{shin2026adaptiveactionchunkingmultichunk,
+    title   = {Adaptive Action Chunking via Multi-Chunk Q Value Estimation},
+    author  = {Yongjae Shin and Jongseong Chae and Seongmin Kim and Jongeui Park and Youngchul Sung},
+    year    = {2026},
+    eprint  = {2605.10044},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.LG},
+    url     = {https://arxiv.org/abs/2605.10044},
+}
+```

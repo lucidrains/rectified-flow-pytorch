@@ -130,6 +130,8 @@ class MeanFlow(Module):
         if not exists(noise):
             noise = self.get_noise(batch_size, data_shape = data_shape)
 
+        batch_size = noise.shape[0]
+
         times = torch.linspace(1., 0., steps + 1, device = device)[:-1]
         delta = 1. / steps
 
