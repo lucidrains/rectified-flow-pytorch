@@ -2,7 +2,7 @@
 Probabilistic Flow PPO
 
 Adopts the 'Back to Basics' approach: Flow Matching actor with a 'predict clean' objective.
-PPO optimizes log probs of the predicted x0 Gaussian manifold.
+PPO optimizes log probs of the predicted x0 Beta manifold.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from shutil import rmtree
 from copy import deepcopy
 from functools import partial
 from collections import deque, namedtuple
+import math
 
 import numpy as np
 from tqdm import tqdm
@@ -22,7 +23,8 @@ from torch import nn, tensor, cat, stack
 import torch.nn.functional as F
 from torch.nn import Module, ModuleList
 from torch.utils.data import TensorDataset, DataLoader
-from torch.distributions import Normal
+
+from discrete_continuous_embed_readout import Readout
 
 import einx
 from einops import repeat, rearrange, pack
@@ -68,8 +70,6 @@ def divisible_by(num, den):
 
 def normalize(t, eps = 1e-5):
     return (t - t.mean()) / (t.std() + eps)
-
-
 
 def add_batch(t):
     return rearrange(t, '... -> 1 ...')
@@ -195,35 +195,48 @@ class Actor(Module):
             dropout = dropout
         )
 
-        self.to_mean = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
-            ReluSquared(),
-            nn.Linear(hidden_dim, num_actions)
+        self.readout = Readout(
+            dim = hidden_dim * 2,
+            num_continuous = num_actions,
+            continuous_dist_type = 'beta'
         )
-        
-        self.log_std = nn.Parameter(torch.full((num_actions,), -0.5))
 
     def forward(self, noised_actions, *, state, time):
         time_emb = self.to_time_emb(time)
 
         inp = cat((noised_actions, state, time_emb), dim = -1)
         hidden = self.net(inp)
-        mean = self.to_mean(hidden)
-        std = self.log_std.exp()
-        return Normal(mean, std)
 
+        params = self.readout(hidden)
+        dist = self.readout.continuous_dist.dist(params)
+
+        return dist
 
 # probabilistic nano flow
 
 class ProbabilisticNanoFlow(Module):
-    def __init__(self, model):
+    def __init__(self, model, eps = 1e-6):
         super().__init__()
         self.model = model
+        self.eps = eps
+
+    def clamp_to_beta_support(self, t):
+        return t.clamp(self.eps, 1. - self.eps)
+
+    def to_unit_interval(self, actions):
+        """[-1, 1] -> [0, 1]"""
+        return self.clamp_to_beta_support((actions + 1.) / 2.)
+
+    def to_action_range(self, unit):
+        """[0, 1] -> [-1, 1]"""
+        return unit * 2. - 1.
 
     @torch.no_grad()
     def sample(self, steps = 4, batch_size = 1, data_shape = None, **kwargs):
         device = next(self.model.parameters()).device
-        noise = torch.randn((batch_size, *data_shape), device = device)
+
+        noise = self.clamp_to_beta_support(torch.rand((batch_size, *data_shape), device = device))
+
         times = torch.linspace(0., 1., steps + 1, device = device)[:-1]
         delta = 1. / steps
         denoised = noise
@@ -231,29 +244,37 @@ class ProbabilisticNanoFlow(Module):
         for time in times:
             time = time.expand(batch_size)
             dist = self.model(denoised, time = time, **kwargs)
-            
-            predicted_clean = dist.mean
-            
+
+            predicted_clean = dist.sample()
+
             padded_time = rearrange(time, '... -> ... 1')
             flow = (predicted_clean - denoised) / (1. - padded_time)
-            denoised = denoised + delta * flow
+            denoised = self.clamp_to_beta_support(denoised + delta * flow)
 
-        return denoised
+        return self.to_action_range(denoised)
 
     def forward(self, data, noise = None, times = None, return_entropy = False, **kwargs):
         batch, device = data.shape[0], data.device
+        num_actions = data.shape[-1]
+
+        unit_data = self.to_unit_interval(data)
+
+        noise = default(noise, torch.rand_like(unit_data))
         times = default(times, torch.rand(batch, device = device))
-        noise = default(noise, torch.randn_like(data))
 
         padded_times = rearrange(times, '... -> ... 1')
-        noised_data = noise.lerp(data, padded_times)
+        noised_data = self.clamp_to_beta_support(noise.lerp(unit_data, padded_times))
 
         dist = self.model(noised_data, time = times, **kwargs)
 
-        log_prob = dist.log_prob(data).sum(dim = -1)
-        
+        log_prob = dist.log_prob(unit_data).sum(dim = -1)
+
+        # jacobian correction for bounded action space scaling
+        jacobian_adjust = math.log(2) * num_actions
+        log_prob = log_prob - jacobian_adjust
+
         if return_entropy:
-            entropy = dist.entropy().sum(dim = -1)
+            entropy = dist.entropy().sum(dim = -1) + jacobian_adjust
             return log_prob, entropy
 
         return log_prob
@@ -336,6 +357,7 @@ class PPO(Module):
         advantage_offset_constant = 0.,
         num_noise_monte_carlo = 4,
         entropy_coef = 0.01,
+        eps = 1e-6,
         ema_kwargs: dict = dict(
             update_model_with_ema_every = 1000
         ),
@@ -345,7 +367,7 @@ class PPO(Module):
         super().__init__()
 
         actor_network = Actor(state_dim, actor_hidden_dim, num_actions)
-        self.actor = ProbabilisticNanoFlow(actor_network)
+        self.actor = ProbabilisticNanoFlow(actor_network, eps = eps)
 
         self.critic = Critic(state_dim, num_actions, critic_hidden_dim, dim_pred = critic_pred_num_bins)
 
@@ -466,7 +488,7 @@ class PPO(Module):
                 expanded_states = repeat(states, 'b ... -> (b n) ...', n = n_mc)
                 expanded_action = repeat(action, 'b ... -> (b n) ...', n = n_mc)
 
-                noise = torch.randn_like(expanded_action)
+                noise = torch.rand_like(expanded_action)
 
                 actor_kwargs = dict(state = expanded_states, noise = noise, times = times)
 
@@ -533,13 +555,14 @@ def main(
     memory_buffer_size = 10_000,
     advantage_offset_constant = 0.,
     epochs = 4,
+    eps = 1e-6,
     seed = None,
     render = True,
     render_every_eps = 100,
     save_every = 1000,
     clear_videos = True,
     video_folder = './lunar-recording',
-    load = False
+    load = False,
 ):
     env = gym.make(
         env_name,
@@ -579,7 +602,8 @@ def main(
         cautious_factor,
         eps_clip,
         ema_decay,
-        advantage_offset_constant
+        advantage_offset_constant,
+        eps = eps,
     ).to(device)
 
     if load:
@@ -608,10 +632,10 @@ def main(
             time += 1
 
             actor_state = add_batch(state)
-            
+
             with torch.no_grad():
                 action = agent.ema_actor.sample(steps = actor_flow_timesteps, batch_size = actor_state.shape[0], data_shape = (num_actions,), state = actor_state)
-            
+
             action = remove_batch(action)
 
             value = agent.ema_critic.forward_eval(cat((state, past_action)))
@@ -619,10 +643,6 @@ def main(
             action_to_env = action.cpu().numpy()
 
             next_state, reward, terminated, truncated, _ = env.step(action_to_env)
-
-            action_out_of_bound_penalty = (action.abs() - 1.).relu().sum()
-
-            reward = reward - action_out_of_bound_penalty
 
             cum_rewards += reward
 

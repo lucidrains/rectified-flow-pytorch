@@ -60,6 +60,7 @@ examples_ql = [
 examples_fpo = [
     "adam-atan2-pytorch",
     "assoc-scan>=0.0.2",
+    "discrete-continuous-embed-readout",
     "box2d-py",
     "einx>=0.3.0",
     "einops>=0.8.0",
