@@ -46,6 +46,12 @@ from rectified_flow_pytorch.nano_flow import NanoFlow
 
 # helpers
 
+def exists(val):
+    return val is not None
+
+def default(v, d):
+    return v if exists(v) else d
+
 def divisible_by(num, den):
     return (num % den) == 0
 
@@ -98,7 +104,8 @@ class TransformerActor(Module):
 
         self.to_actions = nn.Sequential(
             nn.LayerNorm(dim_hidden),
-            nn.Linear(dim_hidden, num_cont_actions)
+            nn.Linear(dim_hidden, num_cont_actions),
+            nn.Tanh()
         )
 
     def forward(self, states, noise):
@@ -110,6 +117,8 @@ class TransformerActor(Module):
             noise = rearrange(noise, 'b d -> b 1 d')
 
         seq = noise.shape[1]
+        is_single_step = seq == 1
+
         noise_tokens = self.noise_proj(noise)
 
         positions = torch.arange(seq, device = noise.device)
@@ -120,8 +129,8 @@ class TransformerActor(Module):
 
         actions = self.to_actions(out[:, 1:])
 
-        if seq == 1:
-            return rearrange(actions, 'b 1 d -> b d')
+        if is_single_step:
+            actions = rearrange(actions, 'b 1 d -> b d')
 
         return actions
 
@@ -218,7 +227,6 @@ class Agent(Module):
         action_chunk_size = 4,
         bc_distill_weight = 1.,
         pessimism_strength = 0.05,
-        oob_penalty_weight = 1.,
         actor_sample_steps_at_rollout = 10,
         max_grad_norm = 1.
     ):
@@ -286,7 +294,6 @@ class Agent(Module):
 
         self.bc_distill_weight = bc_distill_weight
         self.pessimism_strength = pessimism_strength
-        self.oob_penalty_weight = oob_penalty_weight
         self.actor_sample_steps_at_rollout = actor_sample_steps_at_rollout
 
     def learn(self, replay_buffer, num_updates = 1):
@@ -384,15 +391,14 @@ class Agent(Module):
                 with torch.no_grad():
                     valid_bc_actions, valid_noise = self.bc_flow.sample(cond = valid_states, batch_size = valid_states.shape[0], steps = self.actor_sample_steps_at_rollout, return_noise = True)
 
+                    # clamp bc flow generated targets to [-1, 1] to prevent log prob crashes
+                    valid_bc_actions.clamp_(-1., 1.)
+
                     bc_actions_seq = torch.zeros_like(actions)
-                    bc_actions_seq_flat = rearrange(bc_actions_seq, 'b s d -> (b s) d')
-                    bc_actions_seq_flat[loss_mask_flat] = valid_bc_actions
-                    bc_actions_seq = rearrange(bc_actions_seq_flat, '(b s) d -> b s d', b = b)
+                    bc_actions_seq[loss_mask] = valid_bc_actions
 
                     noise_seq = torch.randn_like(actions)
-                    noise_seq_flat = rearrange(noise_seq, 'b s d -> (b s) d')
-                    noise_seq_flat[loss_mask_flat] = valid_noise
-                    noise_seq = rearrange(noise_seq_flat, '(b s) d -> b s d', b = b)
+                    noise_seq[loss_mask] = valid_noise
 
                 one_step_actions_seq = self.one_step_actor(states, noise_seq)
 
@@ -400,9 +406,8 @@ class Agent(Module):
                 q_values = q_value_seq[loss_mask]
 
                 distill_loss = masked_mean((one_step_actions_seq - bc_actions_seq).pow(2).mean(dim = -1), loss_mask)
-                oob_penalty = masked_mean(F.relu(one_step_actions_seq.abs() - 1.).pow(2).mean(dim = -1), loss_mask)
 
-                actor_loss = -q_values.mean() + distill_loss * self.bc_distill_weight + oob_penalty * self.oob_penalty_weight
+                actor_loss = -q_values.mean() + distill_loss * self.bc_distill_weight
 
                 self.accelerator.backward(actor_loss)
                 nn.utils.clip_grad_norm_(self.one_step_actor.parameters(), self.max_grad_norm)
@@ -429,7 +434,6 @@ def main(
     betas = (0.9, 0.999),
     discount_factor = 0.99,
     bc_distill_weight = 1.,
-    oob_penalty_weight = 1.,
     pessimism_strength = 0.05,
     ema_decay = 0.995,
     action_chunk_size = 4,
@@ -512,7 +516,6 @@ def main(
         action_chunk_size = action_chunk_size,
         bc_distill_weight = bc_distill_weight,
         pessimism_strength = pessimism_strength,
-        oob_penalty_weight = oob_penalty_weight,
         actor_sample_steps_at_rollout = actor_sample_steps_at_rollout,
         max_grad_norm = max_grad_norm
     ).to(device)
@@ -602,7 +605,6 @@ def main(
 
                         actions = action_queue.popleft()
 
-                actions.clamp_(-1., 1.)
                 next_state, reward, terminated, truncated, _ = env.step(actions.tolist())
 
                 ep_reward += reward
