@@ -16,7 +16,7 @@ Youtube AI Educators - <a href="https://www.youtube.com/watch?v=7NNxK3CqaDk">Yan
 
 - [Lucas](https://github.com/lucasnewman) for the LSD flow, SoFlow, and Split Mean Flow implementations!
 
-- [Pranoy](https://github.com/pranoyr) for the Unconstrained Alignment (UA) Flow implementation, as well as various bug fixes!
+- [Pranoy](https://github.com/pranoyr) for the Unconstrained Alignment (UA) Flow implementation, Laplacian multiscale flow matching, as well as various bug fixes!
 
 ## Install
 
@@ -366,5 +366,17 @@ $ python train_oxford.py
     archivePrefix = {arXiv},
     primaryClass = {cs.LG},
     url     = {https://arxiv.org/abs/2605.10044},
+}
+```
+
+```bibtex
+@misc{zhao2026laplacianmultiscaleflowmatching,
+    title   = {Laplacian Multi-scale Flow Matching for Generative Modeling}, 
+    author  = {Zelin Zhao and Petr Molodyk and Haotian Xue and Yongxin Chen},
+    year    = {2026},
+    eprint  = {2602.19461},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.CV},
+    url     = {https://arxiv.org/abs/2602.19461}, 
 }
 ```
