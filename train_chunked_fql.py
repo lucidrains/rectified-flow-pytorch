@@ -10,6 +10,7 @@
 # fql   - https://arxiv.org/abs/2502.02538
 # t-sac - https://arxiv.org/abs/2503.03660
 # aac   - https://arxiv.org/abs/2605.10044
+# floq  - https://arxiv.org/abs/2509.06863
 
 from __future__ import annotations
 
@@ -33,6 +34,8 @@ import gymnasium as gym
 
 from einops import rearrange, repeat
 
+import einx
+
 from ema_pytorch import EMA
 
 from x_mlps_pytorch import Feedforwards
@@ -48,6 +51,12 @@ from rectified_flow_pytorch.nano_flow import NanoFlow
 
 def exists(val):
     return val is not None
+
+def symlog(x):
+    return torch.sign(x) * torch.log1p(torch.abs(x))
+
+def symexp(x):
+    return torch.sign(x) * torch.expm1(torch.abs(x))
 
 def default(v, d):
     return v if exists(v) else d
@@ -163,14 +172,27 @@ class TransformerCritic(Module):
         depth = 3,
         heads = 8,
         dim_out = 1,
-        max_seq_len = 16
+        max_seq_len = 16,
+        flow_match = False
     ):
         super().__init__()
         self.dim_out = dim_out
         self.max_seq_len = max_seq_len
+        self.flow_match = flow_match
 
         self.state_proj = nn.Linear(dim_state, dim_hidden)
         self.action_proj = nn.Linear(num_cont_actions, dim_hidden)
+
+        if flow_match:
+            self.value_proj = nn.Linear(1, dim_hidden)
+
+            self.time_proj = nn.Sequential(
+                nn.Linear(1, dim_hidden),
+                nn.GELU(),
+                nn.Linear(dim_hidden, dim_hidden)
+            )
+
+            self.distill_token = nn.Parameter(torch.randn(1, 1, dim_hidden))
 
         self.pos_emb = nn.Embedding(max_seq_len, dim_hidden)
 
@@ -185,7 +207,7 @@ class TransformerCritic(Module):
             nn.Linear(dim_hidden, dim_out)
         )
 
-    def forward(self, state, cont_actions):
+    def forward(self, values = None, *, state, cont_actions, times = None, is_distill = False):
         cont_actions, inverse_seq = pack_with_inverse(cont_actions, 'b * d')
 
         b, seq, _ = cont_actions.shape
@@ -194,19 +216,33 @@ class TransformerCritic(Module):
         state_tokens = rearrange(self.state_proj(state), 'b d -> b 1 d')
         action_tokens = self.action_proj(cont_actions)
 
+        if self.flow_match:
+            if is_distill:
+                action_tokens = einx.add('b s d, 1 1 d', action_tokens, self.distill_token)
+            else:
+                assert exists(values) and exists(times)
+
+                if values.ndim == 2:
+                    values = rearrange(values, 'b s -> b s 1')
+
+                value_tokens = self.value_proj(values)
+                time_tokens = self.time_proj(rearrange(times, 'b -> b 1 1'))
+
+                action_tokens = action_tokens + value_tokens + time_tokens
+
         positions = torch.arange(seq, device = cont_actions.device)
         action_tokens = action_tokens + self.pos_emb(positions)
 
         tokens = cat((state_tokens, action_tokens), dim = 1)
         out = self.decoder(tokens)
 
-        values = self.to_values(out[:, 1:])
-        values = inverse_seq(values)
+        values_out = self.to_values(out[:, 1:])
+        values_out = inverse_seq(values_out)
 
         if self.dim_out == 1:
-            values = rearrange(values, '... 1 -> ...')
+            values_out = rearrange(values_out, '... 1 -> ...')
 
-        return values
+        return values_out
 
 # agent
 
@@ -228,12 +264,16 @@ class Agent(Module):
         bc_distill_weight = 1.,
         pessimism_strength = 0.05,
         actor_sample_steps_at_rollout = 10,
-        max_grad_norm = 1.
+        max_grad_norm = 1.,
+        flow_match_critic = False,
+        flow_match_critic_distillation_num_steps = 4
     ):
         super().__init__()
 
         self.accelerator = accelerator
         self.num_actions = num_actions
+        self.flow_match_critic = flow_match_critic
+        self.flow_match_critic_distillation_num_steps = flow_match_critic_distillation_num_steps
 
         # bc flow actor
 
@@ -264,10 +304,15 @@ class Agent(Module):
         self.critic = TransformerCritic(
             dim_state = state_dim,
             num_cont_actions = num_actions,
-            dim_hidden = critic_hidden_dim
+            dim_hidden = critic_hidden_dim,
+            flow_match = flow_match_critic
         )
 
         self.ema_critic = EMA(self.critic, beta = ema_decay, include_online_model = False, update_every = 1, update_after_step = 0)
+
+        if flow_match_critic:
+            self.critic_flow = NanoFlow(self.critic, times_cond_kwarg = 'times')
+            self.ema_critic_flow = NanoFlow(self.ema_critic, times_cond_kwarg = 'times')
 
         # n-step returns via associative scan
 
@@ -295,6 +340,10 @@ class Agent(Module):
         self.bc_distill_weight = bc_distill_weight
         self.pessimism_strength = pessimism_strength
         self.actor_sample_steps_at_rollout = actor_sample_steps_at_rollout
+
+    def critic_q(self, state, cont_actions):
+        """ get one-step q values from critic - uses distill token if flow match critic """
+        return self.critic(state = state, cont_actions = cont_actions, is_distill = self.flow_match_critic)
 
     def learn(self, replay_buffer, num_updates = 1):
 
@@ -336,32 +385,62 @@ class Agent(Module):
 
                 self.opt_critic.zero_grad()
 
+                distill_steps = self.flow_match_critic_distillation_num_steps
+
                 with torch.no_grad():
                     noise = torch.randn_like(actions[:, 0])
                     next_actions = self.one_step_actor(next_states, noise)
 
                     next_actions_seq = rearrange(next_actions, 'b d -> b 1 d')
-                    target_q_ema = rearrange(self.ema_critic(next_states, next_actions_seq), 'b 1 -> b')
-                    target_q_online = rearrange(self.critic(next_states, next_actions_seq), 'b 1 -> b')
+
+                    if self.flow_match_critic:
+                        sample_kwargs = dict(steps = distill_steps, batch_size = b, data_shape = (1,), state = next_states, cont_actions = next_actions_seq)
+                        target_q_ema = self.ema_critic_flow.sample(**sample_kwargs)
+                        target_q_online = self.critic_flow.sample(**sample_kwargs)
+                    else:
+                        target_q_ema = self.ema_critic(state = next_states, cont_actions = next_actions_seq)
+                        target_q_online = self.critic(state = next_states, cont_actions = next_actions_seq)
+
+                    target_q_ema = rearrange(target_q_ema, 'b 1 -> b')
+                    target_q_online = rearrange(target_q_online, 'b 1 -> b')
                     target_q_all = torch.min(target_q_ema, target_q_online)
+
+                    # compute target q in linear space
+                    target_q_all_linear = symexp(target_q_all)
 
                     inputs = cat((rewards, torch.zeros_like(rewards[:, :1])), dim = 1)
                     batch_indices = torch.arange(b, device = rewards.device)
 
-                    inputs[batch_indices, n_step_lens] = target_q_all
+                    inputs[batch_indices, n_step_lens] = target_q_all_linear
 
                     gates = torch.full_like(inputs, self.discount_factor)
                     gates[batch_indices, n_step_lens] = 0.
                     gates[:, :-1] = gates[:, :-1] * (~terminal).float()
 
-                    target_q = self.assoc_scan(gates, inputs)[:, :-1]
+                    target_q_linear = self.assoc_scan(gates, inputs)[:, :-1]
 
-                pred_q = self.critic(states, actions)
+                    # symlog n-step returns
+                    target_q = symlog(target_q_linear)
 
-                diff = pred_q - target_q
-                tau = 0.5 - self.pessimism_strength
-                weight = torch.where(diff < 0, tau, 1. - tau)
-                critic_loss = masked_mean(weight * diff.square(), loss_mask)
+                # compute 1-step pred q (flow distilled or standard)
+
+                pred_q = self.critic_q(states, actions)
+
+                if self.flow_match_critic:
+                    critic_flow_losses = self.critic_flow(data = target_q, state = states, cont_actions = actions, loss_reduction = 'none')
+                    critic_flow_loss = masked_mean(critic_flow_losses, loss_mask)
+
+                    with torch.no_grad():
+                        distill_target = self.ema_critic_flow.sample(steps = distill_steps, batch_size = b, data_shape = (seq_len,), state = states, cont_actions = actions)
+
+                    critic_distill_loss = masked_mean((pred_q - distill_target) ** 2, loss_mask)
+
+                    critic_loss = critic_flow_loss + critic_distill_loss
+                else:
+                    diff = pred_q - target_q
+                    tau = 0.5 - self.pessimism_strength
+                    weight = torch.where(diff < 0, tau, 1. - tau)
+                    critic_loss = masked_mean(weight * diff.square(), loss_mask)
 
                 self.accelerator.backward(critic_loss)
                 nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
@@ -402,7 +481,7 @@ class Agent(Module):
 
                 one_step_actions_seq = self.one_step_actor(states, noise_seq)
 
-                q_value_seq = self.critic(states, one_step_actions_seq)
+                q_value_seq = self.critic_q(states, one_step_actions_seq)
                 q_values = q_value_seq[loss_mask]
 
                 distill_loss = masked_mean((one_step_actions_seq - bc_actions_seq).pow(2).mean(dim = -1), loss_mask)
@@ -425,7 +504,7 @@ def main(
     max_memory_episodes = 100,
     actor_hidden_dim = 64,
     critic_hidden_dim = 128,
-    max_reward = 100,
+
     batch_size = 256,
     warmup_steps = 1000,
     prob_rand_action = 0.1,
@@ -447,6 +526,8 @@ def main(
     max_grad_norm = 1.,
     rollout_cpu = True,
     actor_sample_steps_at_rollout = 10,
+    flow_match_critic = False,
+    flow_match_critic_distillation_num_steps = 4,
     render = True,
     render_every_eps = 250,
     clear_videos = True,
@@ -517,7 +598,9 @@ def main(
         bc_distill_weight = bc_distill_weight,
         pessimism_strength = pessimism_strength,
         actor_sample_steps_at_rollout = actor_sample_steps_at_rollout,
-        max_grad_norm = max_grad_norm
+        max_grad_norm = max_grad_norm,
+        flow_match_critic = flow_match_critic,
+        flow_match_critic_distillation_num_steps = flow_match_critic_distillation_num_steps
     ).to(device)
 
     if rollout_cpu:
@@ -551,7 +634,7 @@ def main(
                     state_b = rearrange(state, 'd -> 1 d')
 
                     with torch.no_grad():
-                        q_values = agent.critic(state_b.to(device), remaining_actions.to(device))
+                        q_values = agent.critic_q(state_b.to(device), remaining_actions.to(device))
                         q_values = rearrange(q_values, '1 s -> s')
 
                     rem_len = len(action_queue)
@@ -576,7 +659,7 @@ def main(
                         # adaptive action chunking - Shin et al. https://arxiv.org/abs/2605.10044
 
                         if dynamic_chunk or reassess_chunk:
-                            q_values = agent.critic(state_b.to(device), action_chunk.to(device))
+                            q_values = agent.critic_q(state_b.to(device), action_chunk.to(device))
                             q_values = rearrange(q_values, '1 s -> s')
 
                         if dynamic_chunk:
@@ -608,15 +691,14 @@ def main(
                 next_state, reward, terminated, truncated, _ = env.step(actions.tolist())
 
                 ep_reward += reward
-                scaled_reward = reward / max_reward
 
                 next_state = torch.from_numpy(next_state).to(rollout_device)
 
                 replay_buffer.store(
                     state = state,
                     action = actions,
-                    reward = tensor(scaled_reward),
-                    terminal = tensor(terminated),
+                    reward = reward,
+                    terminal = terminated,
                     next_state = next_state
                 )
 
