@@ -153,7 +153,7 @@ class UAFlow(Module):
 
         if isinstance(data, (tuple, list)):
             actual_image, cond = data[0], data[1]
-            cond = cond.flatten()
+            cond = rearrange(cond, 'b 1 -> b') if cond.ndim == 2 and cond.shape[1] == 1 else cond
 
             if self.training and torch.rand(1).item() < 0.1:
                 cond = torch.full_like(cond, -1)

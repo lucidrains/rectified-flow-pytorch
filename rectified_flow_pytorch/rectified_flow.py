@@ -1241,7 +1241,11 @@ class Trainer(Module):
         if isinstance(mock_data, (tuple, list)):
             actual_image, label = mock_data[0], mock_data[1]
             data_shape = actual_image.shape[1:]
-            additional_sample_kwargs['cond'] = label[:self.num_samples].flatten()
+            cond = label[:self.num_samples]
+            if cond.shape[0] < self.num_samples:
+                reps = math.ceil(self.num_samples / cond.shape[0])
+                cond = cond.repeat(reps, *([1] * (cond.ndim - 1)))[:self.num_samples]
+            additional_sample_kwargs['cond'] = rearrange(cond, 'b 1 -> b') if cond.ndim == 2 and cond.shape[1] == 1 else cond
         else:
             data_shape = mock_data.shape[1:]
 
