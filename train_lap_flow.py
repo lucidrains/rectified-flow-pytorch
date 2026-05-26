@@ -1,13 +1,10 @@
 import torch
-from torch.nn import Module
 import torchvision.transforms as T
 from torch.utils.data import Dataset
 from datasets import load_dataset
 
 from rectified_flow_pytorch import LapFlow, LapFlowDiT, Trainer
 
-from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
 
 class OxfordFlowersDataset(Dataset):
     def __init__(self, image_size):
@@ -24,10 +21,13 @@ class OxfordFlowersDataset(Dataset):
     def __getitem__(self, idx):
         item = self.ds[idx]
         pil = item['image']
+        label = item['label']
         
         tensor = self.transform(pil)
+        label_tensor = torch.tensor([label], dtype=torch.float32)
         
-        return tensor / 255.
+        return tensor / 255., label_tensor
+
 
 IMG_SIZE = 64
 BATCH_SIZE = 8
@@ -47,14 +47,17 @@ model = LapFlowDiT(
     heads=8,
     mlp_dim=1024,
     channels=CHANNELS,
-    num_scales=NUM_SCALES
+    num_scales=NUM_SCALES,
+    accept_cond=True,
+    dim_cond=1
 )
 
 lap_flow = LapFlow(
     model=model,
     num_scales=NUM_SCALES,
     normalize_data_fn=lambda t: (t * 2) - 1,
-    unnormalize_data_fn=lambda t: (t + 1) * 0.5
+    unnormalize_data_fn=lambda t: (t + 1) * 0.5,
+    cfg_scale=3.0
 )
 
 

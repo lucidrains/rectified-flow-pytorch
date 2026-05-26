@@ -1,17 +1,15 @@
 
 import math
-from functools import partial
 
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.nn import Module, ModuleList
-from torchdiffeq import odeint
+from torch.nn import Module
 
-from einops import rearrange, repeat, reduce
+from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
+import einx
 
-from huggingface_hub.inference._generated.types import zero_shot_image_classification
 
 
 def pair(t):
@@ -207,6 +205,22 @@ class DiTBlock(Module):
 
 
 
+class SinusoidalPosEmb(Module):
+    def __init__(self, dim, theta = 10000):
+        super().__init__()
+        self.dim = dim
+        self.theta = theta
+
+    def forward(self, x):
+        device = x.device
+        half_dim = self.dim // 2
+        emb = math.log(self.theta) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
+        emb = einx.multiply('i, j -> i j', x, emb)
+        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
+        return emb
+
+
 class LapFlowDiT(Module):
     def __init__(
         self, 
@@ -219,7 +233,10 @@ class LapFlowDiT(Module):
         channels = 3, 
         dim_head = 64, 
         num_scales = 3,
-        dropout = 0.
+        dropout = 0.,
+        accept_cond = False,
+        dim_cond = None,
+        sinusoidal_pos_emb_theta = 10000
     ):
         super().__init__()
         self.num_scales = num_scales
@@ -259,7 +276,17 @@ class LapFlowDiT(Module):
         self.dropout = nn.Dropout(dropout)
         self.t_embedder = TimestepEmbedder(dim)
         
-        self.y_embedder = None
+        self.cond_mlp = None
+        if accept_cond:
+            assert exists(dim_cond), f'`dim_cond` must be set on init'
+            first_dim = dim if dim_cond == 1 else dim_cond
+
+            self.cond_mlp = nn.Sequential(
+                SinusoidalPosEmb(dim, theta = sinusoidal_pos_emb_theta) if dim_cond == 1 else nn.Identity(),
+                nn.Linear(first_dim, dim),
+                nn.GELU(),
+                nn.Linear(dim, dim)
+            )
 
         self.blocks = nn.ModuleList([
             DiTBlock(dim, num_scales, heads, dim_head, mlp_dim, dropout)
@@ -275,8 +302,8 @@ class LapFlowDiT(Module):
 
         assert exists(times), "Time embedding 't' or 'times' must be provided to LapFlowDiT"
         c = self.t_embedder(times)
-        if exists(self.y_embedder) and exists(cond):
-            c = c + self.y_embedder(cond)
+        if exists(self.cond_mlp) and exists(cond):
+            c = c + self.cond_mlp(cond)
 
         for block in self.blocks:
             xs = block(xs, c)
@@ -308,7 +335,8 @@ class LapFlow(Module):
         times_cond_kwarg='times',
         data_shape=None,
         normalize_data_fn=lambda t: t,
-        unnormalize_data_fn=lambda t: t
+        unnormalize_data_fn=lambda t: t,
+        cfg_scale=1.0
     ):
         super().__init__()
 
@@ -320,6 +348,7 @@ class LapFlow(Module):
         self.data_shape = data_shape
         self.normalize_data_fn = normalize_data_fn
         self.unnormalize_data_fn = unnormalize_data_fn
+        self.cfg_scale = cfg_scale
         
         if critical_times is None:
             if num_scales == 2:
@@ -392,7 +421,23 @@ class LapFlow(Module):
                 ]
                 
                 time_kwarg = {self.times_cond_kwarg: time} if exists(self.times_cond_kwarg) else dict()
-                preds = self.model(model_inputs, **time_kwarg, **kwargs)
+                
+                if 'cond' in kwargs and self.cfg_scale > 1.0:
+                    cond = kwargs['cond']
+                    preds_cond = self.model(model_inputs, **time_kwarg, **kwargs)
+                    
+                    kwargs['cond'] = torch.full_like(cond, -1)
+                        
+                    preds_uncond = self.model(model_inputs, **time_kwarg, **kwargs)
+                    
+                    kwargs['cond'] = cond
+                    
+                    preds = [
+                        pred_uncond + self.cfg_scale * (pred_cond - pred_uncond)
+                        for pred_cond, pred_uncond in zip(preds_cond, preds_uncond)
+                    ]
+                else:
+                    preds = self.model(model_inputs, **time_kwarg, **kwargs)
                 
                 pyd_states = [
                     (state + pred * dt) if active else state
@@ -410,7 +455,10 @@ class LapFlow(Module):
     def forward(self, data, **kwargs):
         if isinstance(data, (tuple, list)):
             actual_image, cond = data[0], data[1]
-            cond = cond.flatten()
+            cond = rearrange(cond, 'b 1 -> b') if cond.ndim == 2 and cond.shape[1] == 1 else cond
+            
+            if self.training and torch.rand(1).item() < 0.1:
+                cond = torch.full_like(cond, -1)
                 
             kwargs['cond'] = cond
             data = actual_image
