@@ -371,12 +371,24 @@ $ python train_oxford.py
 
 ```bibtex
 @misc{zhao2026laplacianmultiscaleflowmatching,
-    title   = {Laplacian Multi-scale Flow Matching for Generative Modeling}, 
+    title   = {Laplacian Multi-scale Flow Matching for Generative Modeling},
     author  = {Zelin Zhao and Petr Molodyk and Haotian Xue and Yongxin Chen},
     year    = {2026},
     eprint  = {2602.19461},
     archivePrefix = {arXiv},
     primaryClass = {cs.CV},
-    url     = {https://arxiv.org/abs/2602.19461}, 
+    url     = {https://arxiv.org/abs/2602.19461},
+}
+```
+
+```bibtex
+@misc{huang2026recursiveflowmatching,
+    title   = {Recursive Flow Matching},
+    author  = {Jiahe Huang and Sihan Xu and Sharvaree Vadgama and Rose Yu},
+    year    = {2026},
+    eprint  = {2605.26535},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.LG},
+    url     = {https://arxiv.org/abs/2605.26535},
 }
 ```

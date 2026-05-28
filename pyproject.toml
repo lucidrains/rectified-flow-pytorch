@@ -1,6 +1,6 @@
 [project]
 name = "rectified-flow-pytorch"
-version = "0.9.19"
+version = "0.10.2"
 description = "Rectified Flow in Pytorch"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
@@ -34,7 +34,7 @@ dependencies = [
     'torch_einops_utils>=0.0.30',
     'torchvision',
     'torchdiffeq',
-    "x-transformers>=2.3.21"
+    "x-transformers>=2.3.21",
 ]
 
 [project.urls]

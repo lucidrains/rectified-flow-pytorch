@@ -22,10 +22,10 @@ class OxfordFlowersDataset(Dataset):
         item = self.ds[idx]
         pil = item['image']
         label = item['label']
-        
+
         tensor = self.transform(pil)
         label_tensor = torch.tensor([label], dtype=torch.float32)
-        
+
         return tensor / 255., label_tensor
 
 
@@ -71,9 +71,9 @@ if __name__ == '__main__':
         num_train_steps=100000,
         save_results_every=1000,
         checkpoint_every=5000,
-        grad_accum_every = 4, 
+        grad_accum_every = 4,
         use_ema=True,
         ema_kwargs={'beta': 0.9999}
     )
- 
+
     trainer()
