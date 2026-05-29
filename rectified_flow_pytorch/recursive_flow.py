@@ -37,7 +37,8 @@ class RecursiveFlow(Module):
         predict_clean = False,
         max_timesteps = 100,
         loss_fn = F.mse_loss,
-        consistency_loss_weight = 1.
+        consistency_loss_weight = 1.,
+        detach_scaled_first_pred_flow = False
     ):
         super().__init__()
         self.model = model
@@ -57,6 +58,8 @@ class RecursiveFlow(Module):
 
         self.loss_fn = loss_fn
         self.consistency_loss_weight = consistency_loss_weight
+
+        self.detach_scaled_first_pred_flow = detach_scaled_first_pred_flow
 
     @torch.no_grad()
     def sample(
@@ -180,6 +183,9 @@ class RecursiveFlow(Module):
         pred_flows = rearrange(pred_flow, '(d b) ... -> d b ...', d = D)
 
         scaled_first_pred_flows = einx.multiply('d b, b ... -> d b ...', alphas[1:], pred_flows[0])
+
+        if self.detach_scaled_first_pred_flow:
+            scaled_first_pred_flows = scaled_first_pred_flows.detach()
 
         consistency_losses = loss_fn(scaled_first_pred_flows, pred_flows[1:])
 
