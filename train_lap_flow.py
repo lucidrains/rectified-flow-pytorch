@@ -2,6 +2,7 @@ import torch
 import torchvision.transforms as T
 from torch.utils.data import Dataset
 from datasets import load_dataset
+from diffusers import AutoencoderKL
 
 from rectified_flow_pytorch import LapFlow, LapFlowDiT, Trainer
 
@@ -29,35 +30,56 @@ class OxfordFlowersDataset(Dataset):
         return tensor / 255., label_tensor
 
 
-IMG_SIZE = 64
-BATCH_SIZE = 8
-CHANNELS = 3
-NUM_SCALES = 2
+
+
+use_vae = True
+
+if use_vae:
+    IMG_SIZE = 256
+    kwargs = dict(
+        base_image_size = IMG_SIZE // 8,
+        channels = 4,
+        num_scales = 2
+    )
+else:
+    IMG_SIZE = 64
+    kwargs = dict(
+        base_image_size = 64,
+        channels = 3,
+        num_scales = 2
+    )
+
 
 is_cuda_available = torch.cuda.is_available()
 device = torch.device('cuda' if is_cuda_available else 'cpu')
 
 dataset = OxfordFlowersDataset(image_size=IMG_SIZE)
 
+if use_vae:
+    vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to(device)
+    for param in vae.parameters():
+        param.requires_grad = False
+else:
+    vae = None
+
 model = LapFlowDiT(
-    base_image_size=IMG_SIZE,
+    **kwargs,
     patch_size=2,
     dim=256,
     depth=6,
     heads=8,
     mlp_dim=1024,
-    channels=CHANNELS,
-    num_scales=NUM_SCALES,
     accept_cond=True,
     dim_cond=1
 )
 
 lap_flow = LapFlow(
     model=model,
-    num_scales=NUM_SCALES,
     normalize_data_fn=lambda t: (t * 2) - 1,
     unnormalize_data_fn=lambda t: (t + 1) * 0.5,
-    cfg_scale=3.0
+    cfg_scale=3.0,
+    vae=vae,
+    vae_scale_factor=0.18215
 )
 
 
@@ -66,7 +88,7 @@ if __name__ == '__main__':
     trainer = Trainer(
         lap_flow,
         dataset=dataset,
-        batch_size=BATCH_SIZE,
+        batch_size=8,
         learning_rate=1e-4,
         num_train_steps=100000,
         save_results_every=1000,
