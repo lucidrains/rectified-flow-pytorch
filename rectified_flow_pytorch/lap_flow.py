@@ -26,7 +26,7 @@ def default(v, d):
 
 def down(x): return F.avg_pool2d(x, kernel_size=2, stride=2)
 
-def up(x): return F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
+def up(x): return F.interpolate(x, scale_factor=2, mode='nearest')
 
 
 # https://arxiv.org/abs/2212.09748
@@ -329,36 +329,39 @@ class LapFlow(Module):
     def __init__(
         self,
         model: Module,
-        num_scales=3,
         critical_times=None,
         loss_weights=None,
         times_cond_kwarg='times',
         data_shape=None,
         normalize_data_fn=lambda t: t,
         unnormalize_data_fn=lambda t: t,
-        cfg_scale=1.0
+        cfg_scale=1.0,
+        vae: Module = None,
+        vae_scale_factor: float = 1.0
     ):
         super().__init__()
 
-        assert num_scales in [2, 3]
-
         self.model = model
-        self.num_scales = num_scales
+        self.num_scales = model.num_scales
         self.times_cond_kwarg = times_cond_kwarg
         self.data_shape = data_shape
         self.normalize_data_fn = normalize_data_fn
         self.unnormalize_data_fn = unnormalize_data_fn
         self.cfg_scale = cfg_scale
+        self.vae = vae
+        self.vae_scale_factor = vae_scale_factor
+
+        assert self.num_scales in [2, 3]
 
         if critical_times is None:
-            if num_scales == 2:
+            if self.num_scales == 2:
                 critical_times = [0.0, 0.5]
-            elif num_scales == 3:
+            elif self.num_scales == 3:
                 critical_times = [0.0, 0.33, 0.67]
 
         self.register_buffer('critical_times', torch.tensor(critical_times, dtype=torch.float32))
 
-        weights = default(loss_weights, [1.0] * num_scales)
+        weights = default(loss_weights, [1.0] * self.num_scales)
         self.register_buffer('loss_weights', torch.tensor(weights, dtype=torch.float32))
 
 
@@ -375,7 +378,10 @@ class LapFlow(Module):
 
     @torch.no_grad()
     def sample(self, batch_size=1, data_shape=None, steps=30, **kwargs):
-        data_shape = default(data_shape, self.data_shape)
+        if exists(self.vae) and exists(self.data_shape):
+            data_shape = self.data_shape
+        else:
+            data_shape = default(data_shape, self.data_shape)
         assert exists(data_shape)
 
         device = next(self.model.parameters()).device
@@ -448,6 +454,11 @@ class LapFlow(Module):
         for i in range(1, self.num_scales):
             curr = up(curr) + pyd_states[i]
 
+        if exists(self.vae):
+            curr = curr / self.vae_scale_factor
+            decoded = self.vae.decode(curr)
+            curr = decoded.sample
+
         curr = self.unnormalize_data_fn(curr)
         return curr.clamp(0., 1.)
 
@@ -465,6 +476,13 @@ class LapFlow(Module):
 
 
         data = self.normalize_data_fn(data)
+
+        if exists(self.vae):
+            with torch.no_grad():
+                self.vae.eval()
+                encoded = self.vae.encode(data)
+                data = encoded.latent_dist.sample()
+                data = data * self.vae_scale_factor
 
         shape, ndim = data.shape, data.ndim
 
