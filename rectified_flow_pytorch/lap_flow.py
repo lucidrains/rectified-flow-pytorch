@@ -204,7 +204,6 @@ class DiTBlock(Module):
         return outs
 
 
-
 class SinusoidalPosEmb(Module):
     def __init__(self, dim, theta = 10000):
         super().__init__()
@@ -219,6 +218,18 @@ class SinusoidalPosEmb(Module):
         emb = einx.multiply('i, j -> i j', x, emb)
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
         return emb
+
+
+class LabelEmbedder(nn.Module):
+    def __init__(self, num_classes, hidden_size):
+        super().__init__()
+        self.num_classes = num_classes
+        self.embedding_table = nn.Embedding(num_classes + 1, hidden_size)
+
+    def forward(self, labels):
+        labels = labels.long()
+        labels = torch.where(labels < 0, self.num_classes, labels)
+        return self.embedding_table(labels)
 
 
 class LapFlowDiT(Module):
@@ -236,6 +247,8 @@ class LapFlowDiT(Module):
         dropout = 0.,
         accept_cond = False,
         dim_cond = None,
+        cond_as_labels = False,
+        num_classes = None,
         sinusoidal_pos_emb_theta = 10000
     ):
         super().__init__()
@@ -278,15 +291,24 @@ class LapFlowDiT(Module):
 
         self.cond_mlp = None
         if accept_cond:
-            assert exists(dim_cond), f'`dim_cond` must be set on init'
-            first_dim = dim if dim_cond == 1 else dim_cond
+            if cond_as_labels:
+                assert exists(num_classes), f'`num_classes` must be set when `cond_as_labels` is True'
+                self.cond_mlp = nn.Sequential(
+                    LabelEmbedder(num_classes, dim),
+                    nn.Linear(dim, dim),
+                    nn.GELU(),
+                    nn.Linear(dim, dim)
+                )
+            else:
+                assert exists(dim_cond), f'`dim_cond` must be set on init'
+                first_dim = dim if dim_cond == 1 else dim_cond
 
-            self.cond_mlp = nn.Sequential(
-                SinusoidalPosEmb(dim, theta = sinusoidal_pos_emb_theta) if dim_cond == 1 else nn.Identity(),
-                nn.Linear(first_dim, dim),
-                nn.GELU(),
-                nn.Linear(dim, dim)
-            )
+                self.cond_mlp = nn.Sequential(
+                    SinusoidalPosEmb(dim, theta = sinusoidal_pos_emb_theta) if dim_cond == 1 else nn.Identity(),
+                    nn.Linear(first_dim, dim),
+                    nn.GELU(),
+                    nn.Linear(dim, dim)
+                )
 
         self.blocks = nn.ModuleList([
             DiTBlock(dim, num_scales, heads, dim_head, mlp_dim, dropout)

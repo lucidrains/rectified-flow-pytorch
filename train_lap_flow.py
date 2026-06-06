@@ -70,7 +70,8 @@ model = LapFlowDiT(
     heads=8,
     mlp_dim=1024,
     accept_cond=True,
-    dim_cond=1
+    cond_as_labels=True,
+    num_classes=102
 )
 
 lap_flow = LapFlow(
