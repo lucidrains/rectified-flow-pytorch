@@ -48,41 +48,54 @@ class NanoFlow(Module):
         batch_size = 1,
         data_shape = None,
         return_noise = False,
+        noise = None,
+        image = None,
+        reverse = False,
+        eps = 1e-5,
         **kwargs
     ):
+        assert exists(image) == reverse
+        assert not (exists(image) and exists(noise))
+
         assert 1 <= steps <= self.max_timesteps
 
         data_shape = default(data_shape, self.data_shape)
         assert exists(data_shape), 'shape of the data must be passed in, or set at init or during training'
         device = next(self.model.parameters()).device
 
-        noise = torch.randn((batch_size, *data_shape), device = device)
+        init = image if reverse else default(noise, torch.randn((batch_size, *data_shape), device = device))
 
-        times = torch.linspace(0., 1., steps + 1, device = device)[:-1]
-        delta = 1. / steps
+        times = torch.linspace(0., 1., steps + 1, device = device)
 
-        denoised = noise
+        if reverse:
+            times = times.flip(0)
+
+        times = times[:-1]
+
+        delta = (1. / steps) * (-1. if reverse else 1.)
+
+        state = init
 
         for time in times:
             time = time.expand(batch_size)
             time_kwarg = {self.times_cond_kwarg: time} if exists(self.times_cond_kwarg) else dict()
 
-            model_output = self.model(denoised, **time_kwarg, **kwargs)
+            model_output = self.model(state, **time_kwarg, **kwargs)
 
             if self.predict_clean:
-                padded_time = append_dims(time, denoised.ndim - 1)
-                pred_flow = (model_output - denoised) / (1. - padded_time)
+                padded_time = append_dims(time, state.ndim - 1)
+                pred_flow = (model_output - state) / (1. - padded_time).clamp(min = eps)
             else:
                 pred_flow = model_output
 
-            denoised = denoised + delta * pred_flow
+            state = state + delta * pred_flow
 
-        out = self.unnormalize_data_fn(denoised)
+        out = self.unnormalize_data_fn(state)
 
         if not return_noise:
             return out
 
-        return out, noise
+        return out, init
 
     def forward(self, data, noise = None, times = None, loss_reduction = 'mean', **kwargs):
         data = self.normalize_data_fn(data)
@@ -127,3 +140,6 @@ if __name__ == '__main__':
 
     sampled = nano_flow.sample(batch_size = 16)
     assert sampled.shape == data.shape
+
+    reversed_noise = nano_flow.sample(batch_size = 16, image = sampled, reverse = True)
+    assert reversed_noise.shape == data.shape

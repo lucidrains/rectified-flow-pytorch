@@ -341,14 +341,19 @@ class RectifiedFlow(Module):
         batch_size = 1,
         steps = 16,
         noise = None,
+        image = None,
         data_shape: tuple[int, ...] | None = None,
         temperature: float = 1.,
         use_ema: bool = False,
         ref_image = None,               # Follow the mean - https://arxiv.org/abs/2605.10302
         ref_image_guide_strength = 0.1,
         ref_image_max_time_guide = 0.85,
+        reverse = False,
         **model_kwargs
     ):
+        assert exists(image) == reverse
+        assert not (exists(image) and exists(noise))
+
         use_ema = default(use_ema, self.use_consistency)
         assert not (use_ema and not self.use_consistency), 'in order to sample from an ema model, you must have `use_consistency` turned on'
 
@@ -397,17 +402,20 @@ class RectifiedFlow(Module):
 
             return flow
 
-        # start with random gaussian noise - y0
+        # start with random gaussian noise or image
 
-        noise = default(noise, torch.randn((batch_size, *data_shape), device = self.device))
+        init = image if reverse else default(noise, torch.randn((batch_size, *data_shape), device = self.device))
 
         # time steps
 
         times = torch.linspace(0., 1., steps, device = self.device)
 
+        if reverse:
+            times = times.flip(0)
+
         # ode
 
-        trajectory = odeint(ode_fn, noise, times, **self.odeint_kwargs)
+        trajectory = odeint(ode_fn, init, times, **self.odeint_kwargs)
 
         sampled_data = trajectory[-1]
 
