@@ -301,7 +301,7 @@ class RectifiedFlow(Module):
 
             model_kwargs.update(**{time_kwarg: times})
 
-        output = self.model(noised, **model_kwargs)
+        output = model(noised, **model_kwargs)
 
         # depending on objective, derive flow
 
