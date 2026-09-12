@@ -24,7 +24,7 @@ import torch.nn.functional as F
 from torch.nn import Module, ModuleList
 from torch.utils.data import TensorDataset, DataLoader
 
-from discrete_continuous_embed_readout import Readout
+from mean_conc_beta import Beta
 
 import einx
 from einops import repeat, rearrange, pack
@@ -47,16 +47,21 @@ import gymnasium as gym
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
-# memory tuple
+# memory
 
-Memory = namedtuple('Memory', [
-    'learnable',
+StepMemory = namedtuple('StepMemory', [
     'state',
-    'action',
     'past_action',
     'reward',
-    'is_boundary',
+    'mask',
     'value',
+    'next_value',
+])
+
+ChunkMemory = namedtuple('ChunkMemory', [
+    'state',
+    'action_chunk',
+    'step_indices',
 ])
 
 # helpers
@@ -79,7 +84,7 @@ def add_batch(t):
 def remove_batch(t):
     return rearrange(t, '1 ... -> ...')
 
-# SimBa - Kaist + SonyAI
+# simba - kaist + sonyai
 
 class ReluSquared(Module):
     def forward(self, x):
@@ -97,9 +102,7 @@ class SimBa(Module):
         num_residual_streams = 4
     ):
         super().__init__()
-        """
-        following the design of SimBa https://arxiv.org/abs/2410.09754v1
-        """
+        # simba - https://arxiv.org/abs/2410.09754v1
 
         self.num_residual_streams = num_residual_streams
 
@@ -128,7 +131,7 @@ class SimBa(Module):
             layer = init_hyper_conn(dim = dim_hidden, layer_index = ind, branch = layer)
             layers.append(layer)
 
-        # final layer out
+        # final norm
 
         self.layers = ModuleList(layers)
 
@@ -156,7 +159,7 @@ class SimBa(Module):
 
         return out
 
-# networks
+# actor
 
 class RandomFourierEmbed(Module):
     def __init__(
@@ -178,11 +181,20 @@ class Actor(Module):
         state_dim,
         hidden_dim,
         num_actions,
+        chunk_size = 3,
         dim_time = 16,
         mlp_depth = 3,
-        dropout = 0.1,
+        dropout = 0.,
+        bounds = (-1., 1.),
+        init_conc = 2.,
+        unimodal = True,
+        **beta_kwargs
     ):
         super().__init__()
+
+        self.num_actions = num_actions
+        self.chunk_size = chunk_size
+        self.bounds = bounds
 
         self.to_time_emb = nn.Sequential(
             RandomFourierEmbed(dim_time),
@@ -190,55 +202,86 @@ class Actor(Module):
             nn.SiLU()
         )
 
+        dim_actions = num_actions * chunk_size
+
         self.net = SimBa(
-            state_dim + dim_time + num_actions,
+            state_dim + dim_time + dim_actions,
             dim_hidden = hidden_dim * 2,
             depth = mlp_depth,
             dropout = dropout
         )
 
-        self.readout = Readout(
-            dim = hidden_dim * 2,
-            num_continuous = num_actions,
-            continuous_dist_type = 'beta',
-            continuous_dist_kwargs = dict(unimodal = True)
+        self.to_params = nn.Linear(hidden_dim * 2, dim_actions * 2)
+        nn.init.normal_(self.to_params.weight, std = 0.01)
+        nn.init.zeros_(self.to_params.bias)
+
+        self.distr = Beta(
+            bounds = bounds,
+            init_conc = init_conc,
+            unimodal = unimodal,
+            **beta_kwargs
         )
 
     def forward(self, noised_actions, *, state, time):
         time_emb = self.to_time_emb(time)
 
-        inp = cat((noised_actions, state, time_emb), dim = -1)
+        if noised_actions.ndim > 2 and noised_actions.shape[-2:] == (self.chunk_size, self.num_actions):
+            flat_noised_actions = rearrange(noised_actions, '... c a -> ... (c a)')
+        else:
+            flat_noised_actions = noised_actions
+
+        inp = cat((flat_noised_actions, state, time_emb), dim = -1)
         hidden = self.net(inp)
 
-        params = self.readout(hidden)
-        dist = self.readout.continuous_dist.dist(params)
+        params = self.to_params(hidden)
+        params = rearrange(params, '... (c a d) -> ... c a d', c = self.chunk_size, a = self.num_actions, d = 2)
+
+        dist = self.distr(params)
 
         return dist
 
 # probabilistic nano flow
 
 class ProbabilisticNanoFlow(Module):
-    def __init__(self, model, eps = 1e-6):
+    def __init__(
+        self,
+        model,
+        bounds = (-1., 1.),
+        eps = 1e-5
+    ):
         super().__init__()
         self.model = model
+        self.bounds = bounds
         self.eps = eps
 
-    def clamp_to_beta_support(self, t):
-        return t.clamp(self.eps, 1. - self.eps)
+    @property
+    def chunk_size(self):
+        return getattr(self.model, 'chunk_size', 1)
 
-    def to_unit_interval(self, actions):
-        """[-1, 1] -> [0, 1]"""
-        return self.clamp_to_beta_support((actions + 1.) / 2.)
+    @property
+    def num_actions(self):
+        return self.model.num_actions
 
-    def to_action_range(self, unit):
-        """[0, 1] -> [-1, 1]"""
-        return unit * 2. - 1.
+    @property
+    def low(self):
+        return self.bounds[0]
+
+    @property
+    def high(self):
+        return self.bounds[1]
+
+    def clamp_to_support(self, t):
+        return t.clamp(self.low + self.eps, self.high - self.eps)
+
+    def sample_noise(self, shape, device):
+        return torch.randn(shape, device = device)
 
     @torch.no_grad()
     def sample(self, steps = 4, batch_size = 1, data_shape = None, **kwargs):
         device = next(self.model.parameters()).device
+        data_shape = default(data_shape, (self.chunk_size, self.num_actions))
 
-        noise = self.clamp_to_beta_support(torch.rand((batch_size, *data_shape), device = device))
+        noise = self.sample_noise((batch_size, *data_shape), device = device)
 
         times = torch.linspace(0., 1., steps + 1, device = device)[:-1]
         delta = 1. / steps
@@ -250,34 +293,34 @@ class ProbabilisticNanoFlow(Module):
 
             predicted_clean = dist.sample()
 
-            padded_time = rearrange(time, '... -> ... 1')
+            pad_dims = (1,) * (denoised.ndim - 1)
+            padded_time = time.view(-1, *pad_dims)
             flow = (predicted_clean - denoised) / (1. - padded_time)
-            denoised = self.clamp_to_beta_support(denoised + delta * flow)
+            denoised = denoised + delta * flow
 
-        return self.to_action_range(denoised)
+        return self.clamp_to_support(denoised)
 
     def forward(self, data, noise = None, times = None, return_entropy = False, **kwargs):
         batch, device = data.shape[0], data.device
-        num_actions = data.shape[-1]
 
-        unit_data = self.to_unit_interval(data)
+        target_data = self.clamp_to_support(data)
 
-        noise = default(noise, torch.rand_like(unit_data))
-        times = default(times, torch.rand(batch, device = device))
+        if not exists(noise):
+            noise = self.sample_noise(data.shape, device = device)
 
-        padded_times = rearrange(times, '... -> ... 1')
-        noised_data = self.clamp_to_beta_support(noise.lerp(unit_data, padded_times))
+        if not exists(times):
+            times = torch.rand(batch, device = device)
+
+        pad_dims = (1,) * (data.ndim - 1)
+        padded_times = times.view(-1, *pad_dims)
+        noised_data = noise.lerp(target_data, padded_times)
 
         dist = self.model(noised_data, time = times, **kwargs)
 
-        log_prob = dist.log_prob(unit_data).sum(dim = -1)
-
-        # jacobian correction for bounded action space scaling
-        jacobian_adjust = math.log(2) * num_actions
-        log_prob = log_prob - jacobian_adjust
+        log_prob = dist.log_prob(target_data).sum(dim = -1)
 
         if return_entropy:
-            entropy = dist.entropy().sum(dim = -1) + jacobian_adjust
+            entropy = dist.entropy().sum(dim = -1)
             return log_prob, entropy
 
         return log_prob
@@ -292,7 +335,7 @@ class Critic(Module):
         num_actions,
         hidden_dim,
         dim_pred = 1,
-        mlp_depth = 6, # recent paper has findings that show scaling critic is more important than scaling actor
+        mlp_depth = 6,
         dropout = 0.1,
     ):
         super().__init__()
@@ -311,23 +354,20 @@ class Critic(Module):
         value = self.value_head(hidden)
         return value
 
-# GAE
+# gae
 
 def calc_gae(
     rewards,
     values,
+    next_values,
     masks,
     gamma = 0.99,
     lam = 0.95,
     use_accelerated = None
 ):
-    assert values.shape[-1] == rewards.shape[-1]
     use_accelerated = default(use_accelerated, rewards.is_cuda)
 
-    values = F.pad(values, (0, 1), value = 0.)
-    values, values_next = values[:-1], values[1:]
-
-    delta = rewards + gamma * values_next * masks - values
+    delta = rewards + gamma * next_values * masks - values
     gates = gamma * lam * masks
 
     scan = AssocScan(reverse = True, use_accelerated = use_accelerated)
@@ -336,9 +376,9 @@ def calc_gae(
 
     returns = gae + values
 
-    return returns
+    return returns, gae
 
-# agent
+# ppo
 
 class PPO(Module):
     def __init__(
@@ -360,17 +400,35 @@ class PPO(Module):
         advantage_offset_constant = 0.,
         num_noise_monte_carlo = 4,
         entropy_coef = 0.01,
+        xm_temperature = 0.05,
         eps = 1e-6,
+        chunk_size = 3,
         ema_kwargs: dict = dict(
             update_model_with_ema_every = 1000
         ),
-        reward_range = (-100., 100.),
-        save_path = './prob_flow.pt'
+        reward_range = (-300., 300.),
+        save_path = './prob_flow.pt',
+        bounds = (-1., 1.),
+        init_conc = 2.,
+        unimodal = True,
+        actor_kwargs: dict = dict(),
     ):
         super().__init__()
 
-        actor_network = Actor(state_dim, actor_hidden_dim, num_actions)
-        self.actor = ProbabilisticNanoFlow(actor_network, eps = eps)
+        self.chunk_size = chunk_size
+        self.xm_temperature = xm_temperature
+
+        actor_network = Actor(
+            state_dim,
+            actor_hidden_dim,
+            num_actions,
+            chunk_size = chunk_size,
+            bounds = bounds,
+            init_conc = init_conc,
+            unimodal = unimodal,
+            **actor_kwargs
+        )
+        self.actor = ProbabilisticNanoFlow(actor_network, bounds = bounds, eps = eps)
 
         self.critic = Critic(state_dim, num_actions, critic_hidden_dim, dim_pred = critic_pred_num_bins)
 
@@ -410,6 +468,8 @@ class PPO(Module):
         torch.save({
             'actor': self.actor.state_dict(),
             'critic': self.critic.state_dict(),
+            'ema_actor': self.ema_actor.state_dict(),
+            'ema_critic': self.ema_critic.state_dict(),
         }, str(self.save_path))
 
     def load(self):
@@ -421,120 +481,159 @@ class PPO(Module):
         self.actor.load_state_dict(data['actor'])
         self.critic.load_state_dict(data['critic'])
 
-    def learn(self, memories):
+        if 'ema_actor' in data:
+            self.ema_actor.load_state_dict(data['ema_actor'])
+        else:
+            self.ema_actor.copy_params_from_model_to_ema()
+
+        if 'ema_critic' in data:
+            self.ema_critic.load_state_dict(data['ema_critic'])
+        else:
+            self.ema_critic.copy_params_from_model_to_ema()
+
+    def learn(self, step_memories, chunk_memories):
         eps_clip = self.eps_clip
         hl_gauss = self.critic_hl_gauss_loss
 
-        # retrieve and prepare data from memory for training
+        # gae
 
-        (
-            learnable,
-            states,
-            action,
-            past_action,
-            rewards,
-            is_boundaries,
-            values,
-        ) = zip(*memories)
+        rewards = tensor([m.reward for m in step_memories], device = device)
+        masks = tensor([m.mask for m in step_memories], device = device)
+        values = stack([m.value for m in step_memories])
+        next_values = stack([m.next_value for m in step_memories])
 
-        masks = [(1. - float(is_boundary)) for is_boundary in is_boundaries]
-
-        # calculate generalized advantage estimate
-
-        scalar_values = hl_gauss(stack(values))
+        scalar_values = hl_gauss(values)
+        scalar_next_values = hl_gauss(next_values)
 
         with torch.no_grad():
-            calc_gae_from_values = partial(calc_gae,
-                rewards = tensor(rewards).to(device),
-                masks = tensor(masks).to(device),
-                lam = self.lam,
+            returns, gae = calc_gae(
+                rewards = rewards,
+                values = scalar_values,
+                next_values = scalar_next_values,
+                masks = masks,
                 gamma = self.gamma,
+                lam = self.lam,
                 use_accelerated = False
             )
 
-            returns = calc_gae_from_values(values = scalar_values)
+        norm_advantages = normalize(gae) + self.advantage_offset_constant
 
-        # convert values to torch tensors
+        # actor dataset
 
-        to_torch_tensor = lambda t: stack(t).to(device).detach()
+        all_chunk_states = []
+        all_chunk_actions = []
+        all_chunk_advs = []
+        all_chunk_masks = []
 
-        states = to_torch_tensor(states)
-        action = to_torch_tensor(action)
-        past_action = to_torch_tensor(past_action)
-        old_values = to_torch_tensor(values)
+        for chunk in chunk_memories:
+            indices = chunk.step_indices
+            k = len(indices)
 
-        # deepcopy the actor for the reference actor
+            chunk_adv = torch.zeros(self.chunk_size, device = device)
+            chunk_mask = torch.zeros(self.chunk_size, dtype = torch.bool, device = device)
+
+            chunk_adv[:k] = norm_advantages[indices]
+            chunk_mask[:k] = True
+
+            all_chunk_states.append(chunk.state)
+            all_chunk_actions.append(chunk.action_chunk)
+            all_chunk_advs.append(chunk_adv)
+            all_chunk_masks.append(chunk_mask)
+
+        actor_ds = TensorDataset(
+            stack(all_chunk_states),
+            stack(all_chunk_actions),
+            stack(all_chunk_advs),
+            stack(all_chunk_masks),
+        )
+        actor_dl = DataLoader(actor_ds, batch_size = self.minibatch_size, shuffle = True)
+
+        # critic dataset
+
+        critic_states = stack([m.state for m in step_memories])
+        critic_past_actions = stack([m.past_action for m in step_memories])
+
+        critic_ds = TensorDataset(critic_states, critic_past_actions, returns)
+        critic_dl = DataLoader(critic_ds, batch_size = self.minibatch_size, shuffle = True)
+
+        # sync online models to ema
+
+        self.ema_actor.copy_params_from_ema_to_model()
+        self.ema_critic.copy_params_from_ema_to_model()
+
+        # reference actor
 
         old_actor = deepcopy(self.ema_actor.ema_model)
         old_actor.eval()
 
-        # prepare dataloader for policy phase training
-
-        learnable = tensor(learnable).to(device)
-        data = (states, action, past_action, returns, old_values)
-        data = tuple(t[learnable] for t in data)
-
-        dataset = TensorDataset(*data)
-
-        dl = DataLoader(dataset, batch_size = self.minibatch_size, shuffle = True)
-
-        # policy phase training, similar to original PPO
-
         n_mc = self.num_noise_monte_carlo
 
-        with tqdm(range(self.epochs)) as pbar:
-            for i, (states, action, past_action, returns, old_values) in enumerate(dl):
-                batch = action.shape[0]
+        with tqdm(range(self.epochs), desc = 'epochs', leave = False) as pbar:
+            for epoch in range(self.epochs):
 
-                times = torch.rand((batch * n_mc,), device = action.device)
+                # train actor
 
-                expanded_states = repeat(states, 'b ... -> (b n) ...', n = n_mc)
-                expanded_action = repeat(action, 'b ... -> (b n) ...', n = n_mc)
+                for states, actions, advs, masks in actor_dl:
+                    batch = actions.shape[0]
 
-                noise = torch.rand_like(expanded_action)
+                    # share flow time across candidate noises
 
-                actor_kwargs = dict(state = expanded_states, noise = noise, times = times)
+                    times = repeat(torch.rand(batch, device = device), 'b -> (b n)', n = n_mc)
 
-                log_prob, entropy = self.actor(expanded_action, return_entropy = True, **actor_kwargs)
+                    expanded_states = repeat(states, 'b ... -> (b n) ...', n = n_mc)
+                    expanded_actions = repeat(actions, 'b ... -> (b n) ...', n = n_mc)
+                    expanded_advs = repeat(advs, 'b ... -> (b n) ...', n = n_mc)
+                    expanded_masks = repeat(masks, 'b ... -> (b n) ...', n = n_mc)
 
-                with torch.no_grad():
-                    old_log_prob = old_actor(expanded_action, **actor_kwargs)
+                    noise = self.actor.sample_noise(expanded_actions.shape, device = device)
 
-                scalar_old_values = hl_gauss(old_values)
+                    actor_kwargs = dict(state = expanded_states, noise = noise, times = times)
 
-                # calculate clipped surrogate objective
+                    log_prob, entropy = self.actor(expanded_actions, return_entropy = True, **actor_kwargs)
 
-                ratios = (log_prob - old_log_prob).exp()
+                    with torch.no_grad():
+                        old_log_prob = old_actor(expanded_actions, **actor_kwargs)
 
-                advantages = normalize(returns - scalar_old_values.detach()) + self.advantage_offset_constant
-                advantages = repeat(advantages, 'b -> (b n)', n = n_mc)
+                    ratios = (log_prob - old_log_prob).exp()
 
-                # SPO - Xie et al. https://arxiv.org/abs/2401.16025v9
-                # Asymmetric SPO https://openreview.net/forum?id=BA6n0nmagi
+                    surr1 = ratios * expanded_advs
+                    surr2 = ratios.clamp(1. - eps_clip, 1. + eps_clip) * expanded_advs
 
-                spo_policy_loss = ratios * advantages - (ratios - 1.).square() * advantages.abs() / (2 * self.eps_clip)
+                    ppo_policy_loss = torch.min(surr1, surr2)
+                    spo_policy_loss = ratios * expanded_advs - (ratios - 1.).square() * expanded_advs.abs() / (2 * self.eps_clip)
 
-                ppo_policy_loss = torch.min(ratios * advantages, ratios.clamp(1. - eps_clip, 1. + eps_clip) * advantages)
+                    policy_surr = torch.where(expanded_advs > 0., ppo_policy_loss, spo_policy_loss)
 
-                policy_loss = torch.where(advantages > 0., ppo_policy_loss, spo_policy_loss)
+                    sub_loss = -policy_surr - self.entropy_coef * entropy
+                    sub_loss = sub_loss.masked_fill(~expanded_masks, 0.)
 
-                policy_loss = -policy_loss.mean() - self.entropy_coef * entropy.mean()
+                    # explorative modeling (xm) - alexi gladstone et al.
 
-                policy_loss.backward()
-                self.opt_actor.step()
-                self.opt_actor.zero_grad()
+                    candidate_losses = sub_loss.sum(dim = -1) / expanded_masks.sum(dim = -1).clamp(min = 1)
+                    candidate_losses = rearrange(candidate_losses, '(b n) -> b n', b = batch, n = n_mc)
 
-                # calculate clipped value loss and update value network separate from policy network
+                    if exists(self.xm_temperature) and self.xm_temperature > 0.:
+                        weights = F.softmin(candidate_losses / self.xm_temperature, dim = -1)
+                        policy_loss = (weights.detach() * candidate_losses).sum(dim = -1).mean()
+                    else:
+                        policy_loss = candidate_losses.amin(dim = -1).mean()
 
-                critic_values = self.critic(cat((states, past_action), dim = -1))
-                critic_loss = hl_gauss(critic_values, returns).mean()
+                    policy_loss.backward()
+                    self.opt_actor.step()
+                    self.opt_actor.zero_grad()
 
-                critic_loss.backward()
-                self.opt_critic.step()
-                self.opt_critic.zero_grad()
+                # train critic
 
-            pbar.set_description(f'actor loss: {policy_loss.item():.3f} | critic loss: {critic_loss.item():.3f}')
-            pbar.update(1)
+                for states, past_actions, rets in critic_dl:
+                    critic_values = self.critic(cat((states, past_actions), dim = -1))
+                    critic_loss = hl_gauss(critic_values, rets).mean()
+
+                    critic_loss.backward()
+                    self.opt_critic.step()
+                    self.opt_critic.zero_grad()
+
+                pbar.set_description(f'actor loss: {policy_loss.item():.3f} | critic loss: {critic_loss.item():.3f}')
+                pbar.update(1)
 
 # main
 
@@ -546,6 +645,7 @@ def main(
     actor_flow_timesteps = 4,
     critic_hidden_dim = 64,
     critic_pred_num_bins = 500,
+    chunk_size = 3,
     minibatch_size = 64,
     lr = 0.0003,
     betas = (0.9, 0.99),
@@ -554,7 +654,7 @@ def main(
     eps_clip = 0.05,
     cautious_factor = 0.1,
     ema_decay = 0.9,
-    update_timesteps = 5000,
+    update_timesteps = 1500,
     memory_buffer_size = 10_000,
     advantage_offset_constant = 0.,
     epochs = 4,
@@ -565,10 +665,15 @@ def main(
     save_every = 1000,
     clear_videos = True,
     video_folder = './lunar-recording',
+    save_path = './prob_flow.pt',
     load = False,
     use_wandb = False,
     cpu = True,
     recent_rewards_window = 20,
+    init_conc = 2.,
+    unimodal = True,
+    reward_range = None,
+    xm_temperature = 0.05,
 ):
     accelerator = Accelerator(cpu = cpu)
     device = accelerator.device
@@ -577,11 +682,17 @@ def main(
         import wandb
         wandb.init(project = 'prob-flow-ppo')
 
+    env_kwargs = dict()
+    if 'continuous' in env_name.lower() or 'lunar' in env_name.lower():
+        env_kwargs['continuous'] = True
+
     env = gym.make(
         env_name,
         render_mode = 'rgb_array',
-        continuous = True
+        **env_kwargs
     )
+
+    reward_range = default(reward_range, (-300., 300.))
 
     if render:
         if clear_videos:
@@ -597,6 +708,8 @@ def main(
 
     state_dim = env.observation_space.shape[0]
     num_actions = env.action_space.shape[0]
+    action_space = env.action_space
+    bounds = (float(action_space.low[0]), float(action_space.high[0]))
 
     memories = deque([], memory_buffer_size)
 
@@ -617,6 +730,13 @@ def main(
         ema_decay,
         advantage_offset_constant,
         eps = eps,
+        chunk_size = chunk_size,
+        reward_range = reward_range,
+        bounds = bounds,
+        init_conc = init_conc,
+        unimodal = unimodal,
+        save_path = save_path,
+        xm_temperature = xm_temperature,
     ).to(device)
 
     if load:
@@ -625,6 +745,9 @@ def main(
     if exists(seed):
         torch.manual_seed(seed)
         np.random.seed(seed)
+
+    step_memories = []
+    chunk_memories = []
 
     time = 0
     num_policy_updates = 0
@@ -635,80 +758,95 @@ def main(
     for eps in pbar:
 
         state, _ = env.reset(seed = seed)
-        state = torch.from_numpy(state).to(device)
+        state = torch.from_numpy(state).float().to(device)
 
         cum_rewards = 0.
         past_action = torch.zeros((num_actions,), device = device)
+        timestep = 0
 
-        for i in range(max_timesteps):
-            is_last = i == (max_timesteps - 1)
-            time += 1
-
+        while timestep < max_timesteps:
+            chunk_start_state = state
             actor_state = add_batch(state)
 
             with torch.no_grad():
-                action = agent.ema_actor.sample(steps = actor_flow_timesteps, batch_size = actor_state.shape[0], data_shape = (num_actions,), state = actor_state)
-
-            action = remove_batch(action)
-
-            value = agent.ema_critic.forward_eval(cat((state, past_action)))
-
-            action_to_env = action.cpu().numpy()
-
-            next_state, reward, terminated, truncated, _ = env.step(action_to_env)
-
-            cum_rewards += reward
-
-            next_state = torch.from_numpy(next_state).to(device)
-
-            reward = float(reward)
-
-            memory = Memory(True, state, action, past_action, reward, terminated, value)
-
-            memories.append(memory)
-
-            state = next_state
-            past_action = action
-
-            # determine if truncating, either from environment or learning phase of the agent
-
-            updating_agent = divisible_by(time, update_timesteps)
-            done = terminated or truncated or updating_agent
-
-            # take care of truncated by adding a non-learnable memory storing the next value for GAE
-
-            if done and not terminated:
-                next_value = agent.ema_critic.forward_eval(cat((state, past_action)))
-
-                bootstrap_value_memory = memory._replace(
-                    state = state,
-                    learnable = False,
-                    is_boundary = True,
-                    value = next_value,
+                action_chunk = agent.ema_actor.sample(
+                    steps = actor_flow_timesteps,
+                    batch_size = actor_state.shape[0],
+                    data_shape = (chunk_size, num_actions),
+                    state = actor_state
                 )
 
-                memories.append(bootstrap_value_memory)
+            action_chunk = remove_batch(action_chunk)
 
-            # updating of the agent
+            step_indices = []
+            episode_done = False
+
+            for a_idx in range(chunk_size):
+                time += 1
+                timestep += 1
+
+                sub_state = state
+                sub_past_action = past_action
+                value = agent.ema_critic.forward_eval(cat((sub_state, sub_past_action)))
+
+                action_to_env = action_chunk[a_idx].cpu().numpy()
+                step_next_state, step_reward, terminated, truncated, _ = env.step(action_to_env)
+
+                cum_rewards += step_reward
+                next_state_tensor = torch.from_numpy(step_next_state).float().to(device)
+
+                step_terminated = terminated
+                step_truncated = truncated or (timestep >= max_timesteps)
+                episode_done = step_terminated or step_truncated
+
+                mask = 0. if step_terminated else 1.
+
+                if step_terminated:
+                    next_value = torch.zeros_like(value)
+                else:
+                    with torch.no_grad():
+                        next_value = agent.ema_critic.forward_eval(cat((next_state_tensor, action_chunk[a_idx])))
+
+                step_idx = len(step_memories)
+                step_indices.append(step_idx)
+                step_memories.append(StepMemory(
+                    state = sub_state,
+                    past_action = sub_past_action,
+                    reward = float(step_reward),
+                    mask = mask,
+                    value = value,
+                    next_value = next_value,
+                ))
+
+                state = next_state_tensor
+                past_action = action_chunk[a_idx]
+
+                if episode_done:
+                    break
+
+            chunk_memories.append(ChunkMemory(
+                state = chunk_start_state,
+                action_chunk = action_chunk,
+                step_indices = step_indices,
+            ))
+
+            updating_agent = (time // update_timesteps) > ((time - len(step_indices)) // update_timesteps)
 
             if updating_agent:
                 rewards_tensor = tensor(all_rewards)
+                if len(all_rewards) > 0:
+                    print(f'mean reward: {rewards_tensor.mean().item():.3f} | max reward: {rewards_tensor.amax().item():.3f}')
 
-                print(f'mean reward: {rewards_tensor.mean().item():.3f} | max reward: {rewards_tensor.amax().item():.3f}')
-
-                agent.learn(memories)
+                agent.learn(step_memories, chunk_memories)
                 num_policy_updates += 1
 
-                memories.clear()
+                step_memories.clear()
+                chunk_memories.clear()
                 all_rewards.clear()
 
-            # break if done
-
-            if done or is_last:
+            if episode_done:
                 all_rewards.append(cum_rewards)
                 recent_rewards.append(cum_rewards)
-
-            if done:
                 break
 
         if len(recent_rewards) > 0:
@@ -723,6 +861,9 @@ def main(
 
         if divisible_by(eps, save_every):
             agent.save()
+
+    agent.save()
+    env.close()
 
 if __name__ == '__main__':
     fire.Fire(main)
