@@ -1,9 +1,13 @@
+import math
 from copy import deepcopy
 from pathlib import Path
 
 import torch
 from torch.optim import Adam
 from torch.nn import Module, ModuleList
+from torchvision.utils import save_image
+
+from einops import rearrange
 
 from rectified_flow_pytorch.rectified_flow import RectifiedFlow
 
@@ -17,6 +21,9 @@ def exists(v):
 
 def default(v, d):
     return v if exists(v) else d
+
+def divisible_by(num, den):
+    return (num % den) == 0
 
 # reflow wrapper
 
