@@ -41,7 +41,6 @@ flowers_dataset = OxfordFlowersDataset(
 model = Unet(
     dim = 64,
     dim_mults = (1, 2, 4, 8),
-    num_residual_streams = 4,
     accept_time = False
 )
 

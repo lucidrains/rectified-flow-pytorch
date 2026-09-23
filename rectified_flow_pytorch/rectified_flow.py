@@ -22,7 +22,7 @@ import einx
 from einops import einsum, reduce, rearrange, repeat
 from einops.layers.torch import Rearrange
 
-from hyper_connections.hyper_connections_channel_first import get_init_and_expand_reduce_stream_functions, Residual
+from x_unet import XAttnRes
 
 from scipy.optimize import linear_sum_assignment
 
@@ -608,6 +608,19 @@ class RandomOrLearnedSinusoidalPosEmb(Module):
         fouriered = cat((x, fouriered), dim = -1)
         return fouriered
 
+class Residual(Module):
+    def __init__(
+        self,
+        branch: Module,
+        residual_transform: Module | None = None
+    ):
+        super().__init__()
+        self.branch = branch
+        self.residual_transform = default(residual_transform, nn.Identity())
+
+    def forward(self, x, *args, **kwargs):
+        return self.branch(x, *args, **kwargs) + self.residual_transform(x)
+
 class Block(Module):
     def __init__(self, dim, dim_out, dropout = 0., accept_cond = False):
         super().__init__()
@@ -760,7 +773,6 @@ class Unet(Module):
         attn_heads = 4,
         full_attn = None,    # defaults to full attention only for inner most layer
         flash_attn = False,
-        num_residual_streams = 2,
         accept_cond = False,
         dim_cond = None,
         has_image_cond = False,
@@ -768,7 +780,11 @@ class Unet(Module):
         accept_dest_time = False,
         action_embedder: Module | None = None,
         num_outputs = 1,
-        dim_proj_out_from_inner: int | None = None
+        dim_proj_out_from_inner: int | None = None,
+        xattnres_heads = 1,
+        xattnres_pooling = 'max',
+        xattnres_dim_lora: int | None = 8,
+        xattnres_kwargs: dict | None = None
     ):
         super().__init__()
 
@@ -853,22 +869,43 @@ class Unet(Module):
 
         FullAttention = partial(Attention, flash = flash_attn)
         resnet_block = partial(ResnetBlock, time_emb_dim = time_dim if accept_time else None, dropout = dropout)
-
-        # hyper connections
-
-        init_hyper_conn, self.expand_streams, self.reduce_streams = get_init_and_expand_reduce_stream_functions(num_residual_streams, disable = num_residual_streams == 1)
         res_conv = partial(nn.Conv2d, kernel_size = 1, bias = False)
+
+        # attention residuals (xattnres)
+
+        self.down_xattnres = ModuleList([])
+        self.up_xattnres = ModuleList([])
+
+        history_dims = []
+
+        def create_xattnres(dim, append_to: ModuleList | None = None):
+            attn_res = XAttnRes(
+                dim,
+                dim_ins = tuple(history_dims),
+                heads = xattnres_heads,
+                pooling = xattnres_pooling,
+                dim_lora = xattnres_dim_lora,
+                **default(xattnres_kwargs, {})
+            )
+
+            history_dims.append(dim)
+
+            if exists(append_to):
+                append_to.append(attn_res)
+
+            return attn_res
 
         # layers
 
         self.downs = ModuleList([])
-        self.ups = ModuleList([])
         num_resolutions = len(in_out)
 
         for ind, ((dim_in, dim_out), layer_full_attn, layer_attn_heads, layer_attn_dim_head) in enumerate(zip(in_out, full_attn, attn_heads, attn_dim_head)):
             is_last = ind >= (num_resolutions - 1)
 
             attn_klass = FullAttention if layer_full_attn else LinearAttention
+
+            create_xattnres(dim_in, append_to = self.down_xattnres)
 
             self.downs.append(ModuleList([
                 Residual(branch = resnet_block(dim_in, dim_in)),
@@ -878,9 +915,12 @@ class Unet(Module):
             ]))
 
         mid_dim = dims[-1]
-        self.mid_block1 = init_hyper_conn(dim = mid_dim, branch = resnet_block(mid_dim, mid_dim))
-        self.mid_attn = init_hyper_conn(dim = mid_dim, branch = FullAttention(mid_dim, heads = attn_heads[-1], dim_head = attn_dim_head[-1]))
-        self.mid_block2 = init_hyper_conn(dim = mid_dim, branch = resnet_block(mid_dim, mid_dim))
+
+        self.mid_xattnres = create_xattnres(mid_dim)
+
+        self.mid_block1 = Residual(branch = resnet_block(mid_dim, mid_dim))
+        self.mid_attn = Residual(branch = FullAttention(mid_dim, heads = attn_heads[-1], dim_head = attn_dim_head[-1]))
+        self.mid_block2 = Residual(branch = resnet_block(mid_dim, mid_dim))
 
         self.dim_proj_out_from_inner = dim_proj_out_from_inner
         if exists(dim_proj_out_from_inner):
@@ -889,16 +929,20 @@ class Unet(Module):
                 nn.Linear(mid_dim, dim_proj_out_from_inner)
             )
 
+        self.ups = ModuleList([])
+
         for ind, ((dim_in, dim_out), layer_full_attn, layer_attn_heads, layer_attn_dim_head) in enumerate(zip(*map(reversed, (in_out, full_attn, attn_heads, attn_dim_head)))):
             is_last = ind == (len(in_out) - 1)
 
             attn_klass = FullAttention if layer_full_attn else LinearAttention
 
+            create_xattnres(dim_out, append_to = self.up_xattnres)
+
             self.ups.append(ModuleList([
-                Residual(branch = resnet_block(dim_out + dim_in, dim_out), residual_transform = res_conv(dim_out + dim_in, dim_out)),
-                Residual(branch = resnet_block(dim_out + dim_in, dim_out), residual_transform = res_conv(dim_out + dim_in, dim_out)),
+                Residual(branch = resnet_block(dim_out, dim_out)),
+                Residual(branch = resnet_block(dim_out, dim_out)),
                 Residual(branch = attn_klass(dim_out, dim_head = layer_attn_dim_head, heads = layer_attn_heads)),
-                Upsample(dim_out, dim_in) if not is_last else  nn.Conv2d(dim_out, dim_in, 3, padding = 1)
+                Upsample(dim_out, dim_in) if not is_last else nn.Conv2d(dim_out, dim_in, 3, padding = 1)
             ]))
 
         self.mean_variance_net = mean_variance_net
@@ -956,37 +1000,37 @@ class Unet(Module):
             action_emb = self.action_embedder(action)
             t = t + action_emb
 
-        # hiddens
+        history = []
 
-        h = []
+        for ind, (block1, block2, attn, downsample) in enumerate(self.downs):
+            x = self.down_xattnres[ind](x, history)
 
-        for block1, block2, attn, downsample in self.downs:
             x = block1(x, t)
-            h.append(x)
-
             x = block2(x, t)
             x = attn(x)
-            h.append(x)
+
+            history.append(x)
 
             x = downsample(x)
 
-        x = self.expand_streams(x)
+        x = self.mid_xattnres(x, history)
 
         x = self.mid_block1(x, t)
         x = self.mid_attn(x)
         x = self.mid_block2(x, t)
 
-        x = self.reduce_streams(x)
+        history.append(x)
 
         inner_x = x
 
-        for block1, block2, attn, upsample in self.ups:
-            x = cat((x, h.pop()), dim = 1)
-            x = block1(x, t)
+        for ind, (block1, block2, attn, upsample) in enumerate(self.ups):
+            x = self.up_xattnres[ind](x, history)
 
-            x = cat((x, h.pop()), dim = 1)
+            x = block1(x, t)
             x = block2(x, t)
             x = attn(x)
+
+            history.append(x)
 
             x = upsample(x)
 
@@ -1278,6 +1322,9 @@ class Trainer(Module):
         return sampled
 
     def forward(self):
+
+        if self.is_main:
+            self.accelerator.print(f'saving results to {str(self.results_folder)}')
 
         dl = cycle(self.dl)
 

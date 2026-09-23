@@ -1,3 +1,4 @@
+import fire
 import torch
 
 # hf datasets for easy oxford flowers training
@@ -26,27 +27,43 @@ class OxfordFlowersDataset(Dataset):
         tensor = self.transform(pil)
         return tensor / 255.
 
-flowers_dataset = OxfordFlowersDataset(
-    image_size = 64
-)
-
 # models and trainer
 
 from rectified_flow_pytorch import RectifiedFlow, Unet, Trainer
 
-model = Unet(
+def train(
+    image_size = 64,
     dim = 64,
-    mean_variance_net = False
-)
-
-rectified_flow = RectifiedFlow(model, predict = 'clean')
-
-trainer = Trainer(
-    rectified_flow,
-    dataset = flowers_dataset,
+    batch_size = 16,
     num_train_steps = 70_000,
     sample_temperature = 1.5,
-    results_folder = './results'   # samples will be saved periodically to this folder
-)
+    save_results_every = 100,
+    results_folder = './results',
+    clear_results_folder = True
+):
+    flowers_dataset = OxfordFlowersDataset(
+        image_size = image_size
+    )
 
-trainer()
+    model = Unet(
+        dim = dim,
+        mean_variance_net = False
+    )
+
+    rectified_flow = RectifiedFlow(model, predict = 'clean')
+
+    trainer = Trainer(
+        rectified_flow,
+        dataset = flowers_dataset,
+        batch_size = batch_size,
+        num_train_steps = num_train_steps,
+        sample_temperature = sample_temperature,
+        save_results_every = save_results_every,
+        results_folder = results_folder,
+        clear_results_folder = clear_results_folder
+    )
+
+    trainer()
+
+if __name__ == '__main__':
+    fire.Fire(train)
