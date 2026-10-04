@@ -41,6 +41,15 @@ class NanoFlow(Module):
 
         self.loss_fn = loss_fn
 
+    def predict_flow(self, state, time, eps = 1e-5, **kwargs):
+        model_output = self.model(state, **kwargs)
+
+        if not self.predict_clean:
+            return model_output
+
+        padded_time = append_dims(time, state.ndim - 1)
+        return (model_output - state) / (1. - padded_time).clamp(min = eps)
+
     @torch.no_grad()
     def sample(
         self,
@@ -51,11 +60,13 @@ class NanoFlow(Module):
         noise = None,
         image = None,
         reverse = False,
+        reverse_fixed_point_steps = 1,
         eps = 1e-5,
         **kwargs
     ):
         assert exists(image) == reverse
         assert not (exists(image) and exists(noise))
+        assert reverse_fixed_point_steps >= 1
 
         assert 1 <= steps <= self.max_timesteps
 
@@ -65,12 +76,10 @@ class NanoFlow(Module):
 
         init = image if reverse else default(noise, torch.randn((batch_size, *data_shape), device = device))
 
-        times = torch.linspace(0., 1., steps + 1, device = device)
+        times = torch.linspace(0., 1., steps + 1, device = device)[:-1]
 
         if reverse:
             times = times.flip(0)
-
-        times = times[:-1]
 
         delta = (1. / steps) * (-1. if reverse else 1.)
 
@@ -80,15 +89,16 @@ class NanoFlow(Module):
             time = time.expand(batch_size)
             time_kwarg = {self.times_cond_kwarg: time} if exists(self.times_cond_kwarg) else dict()
 
-            model_output = self.model(state, **time_kwarg, **kwargs)
+            if not reverse:
+                state = state + delta * self.predict_flow(state, time, eps = eps, **time_kwarg, **kwargs)
+                continue
 
-            if self.predict_clean:
-                padded_time = append_dims(time, state.ndim - 1)
-                pred_flow = (model_output - state) / (1. - padded_time).clamp(min = eps)
-            else:
-                pred_flow = model_output
+            # reverse - implicit backward euler via fixed point iteration - AIDI https://arxiv.org/abs/2309.04907, SelFix https://arxiv.org/abs/2606.17584 for rectified flow
 
-            state = state + delta * pred_flow
+            target = state
+
+            for _ in range(reverse_fixed_point_steps):
+                state = target + delta * self.predict_flow(state, time, eps = eps, **time_kwarg, **kwargs)
 
         out = self.unnormalize_data_fn(state)
 

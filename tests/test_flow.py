@@ -20,6 +20,46 @@ def test_nano_flow():
     assert sampled.shape == data.shape
 
 
+def test_nano_flow_reverse_fixed_point_inversion():
+    import torch.nn.functional as F
+    from einops import rearrange
+    from rectified_flow_pytorch.nano_flow import NanoFlow
+
+    class ToyVelocity(Module):
+        # lipschitz constant 0.25, so the fixed point iteration contracts
+
+        def __init__(self):
+            super().__init__()
+            self.scale = nn.Parameter(torch.tensor(0.25))
+            self.offset = nn.Parameter(torch.tensor(0.1))
+
+        def forward(self, x, times = None):
+            return self.scale * torch.tanh(x) + self.offset * torch.sin(rearrange(times, 'b -> b 1'))
+
+    nano_flow = NanoFlow(ToyVelocity(), times_cond_kwarg = 'times', data_shape = (2,))
+
+    batch = 64
+    noise = torch.randn(batch, 2)
+
+    for steps in (2, 4, 8):
+        actions = nano_flow.sample(batch_size = batch, noise = noise, steps = steps)
+
+        invert = lambda **kwargs: nano_flow.sample(batch_size = batch, image = actions, steps = steps, reverse = True, **kwargs)
+
+        explicit = invert()
+        fixed_point = invert(reverse_fixed_point_steps = 5)
+
+        # fixed point inversion recovers the noise far more accurately than a single explicit reverse step
+
+        assert F.mse_loss(fixed_point, noise) < F.mse_loss(explicit, noise) * 1e-2
+
+        # and reproduces the actions upon re-forwarding
+
+        recon = lambda latents: nano_flow.sample(batch_size = batch, noise = latents, steps = steps)
+
+        assert F.mse_loss(recon(fixed_point), actions) < F.mse_loss(recon(explicit), actions) * 1e-2
+
+
 @param('add_recon_loss', (False, True))
 @param('accept_cond', (False, True))
 @param('use_adaptive_loss_weight', (False, True))
