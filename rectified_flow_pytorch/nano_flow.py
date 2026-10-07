@@ -83,7 +83,7 @@ class NanoFlow(Module):
 
         delta = (1. / steps) * (-1. if reverse else 1.)
 
-        state = init
+        state = self.normalize_data_fn(init) if reverse else init
 
         for time in times:
             time = time.expand(batch_size)
@@ -100,7 +100,7 @@ class NanoFlow(Module):
             for _ in range(reverse_fixed_point_steps):
                 state = target + delta * self.predict_flow(state, time, eps = eps, **time_kwarg, **kwargs)
 
-        out = self.unnormalize_data_fn(state)
+        out = state if reverse else self.unnormalize_data_fn(state)
 
         if not return_noise:
             return out
