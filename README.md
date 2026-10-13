@@ -404,3 +404,39 @@ $ python train_oxford.py
     url     = {https://arxiv.org/abs/2607.27372},
 }
 ```
+
+```bibtex
+@misc{jabri2022scalableadaptivecomputationgenerative,
+    title   = {Scalable Adaptive Computation for Generative Modeling},
+    author  = {Allan Jabri and David Fleet and Alexei A. Efros},
+    year    = {2022},
+    eprint  = {2212.11972},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.CV},
+    url     = {https://arxiv.org/abs/2212.11972},
+}
+```
+
+```bibtex
+@misc{sieberling2026triadiclinearattentionthreedimensional,
+    title   = {Triadic Linear Attention: Three-Dimensional Recurrent States for Long-Context Sequence Modeling},
+    author  = {Oliver Sieberling and Bharat Runwal and David Jin and Ryan Chin and Rameswar Panda and Yoon Kim},
+    year    = {2026},
+    eprint  = {2609.36529},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.LG},
+    url     = {https://arxiv.org/abs/2609.36529},
+}
+```
+
+```bibtex
+@misc{wang2026fullbandwidthtransformer,
+    title   = {Full-Bandwidth Transformer},
+    author  = {Xi Wang and Ziyang Cai and Zheng Zhan and Harry Dong and Ying Fan and Gustavo de Rosa and Tim Pearce and John Langford},
+    year    = {2026},
+    eprint  = {2608.08888},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.LG},
+    url     = {https://arxiv.org/abs/2608.08888},
+}
+```

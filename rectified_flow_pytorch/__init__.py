@@ -7,6 +7,11 @@ from rectified_flow_pytorch.rectified_flow import (
 
 from rectified_flow_pytorch.nano_flow import NanoFlow
 
+from rectified_flow_pytorch.recurrent_state_nano_flow import (
+    RecurrentStateMemory,
+    RecurrentStateNanoFlow
+)
+
 from rectified_flow_pytorch.mean_flow import MeanFlow
 
 from rectified_flow_pytorch.reflow import (

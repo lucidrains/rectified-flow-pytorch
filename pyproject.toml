@@ -1,6 +1,6 @@
 [project]
 name = "rectified-flow-pytorch"
-version = "0.12.1"
+version = "0.14.0"
 description = "Rectified Flow in Pytorch"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
@@ -30,7 +30,7 @@ dependencies = [
     "rotary-embedding-torch>=0.8.9",
     'scipy',
     'torch>=2.0',
-    'torch_einops_utils>=0.0.30',
+    'torch_einops_utils>=0.1.34',
     'torchvision',
     'torchdiffeq',
     "x-transformers>=2.3.21",
