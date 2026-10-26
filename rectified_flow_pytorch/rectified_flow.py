@@ -1141,6 +1141,7 @@ class Trainer(Module):
         num_train_steps = 70_000,
         learning_rate = 3e-4,
         batch_size = 16,
+        num_workers = 0,
         checkpoints_folder: str = './checkpoints',
         results_folder: str = './results',
         save_results_every: int = 100,
@@ -1194,7 +1195,7 @@ class Trainer(Module):
         # optimizer, dataloader, and all that
 
         self.optimizer = Adam(rectified_flow.parameters(), lr = learning_rate, **adam_kwargs)
-        self.dl = DataLoader(dataset, batch_size = batch_size, shuffle = True, drop_last = True)
+        self.dl = DataLoader(dataset, batch_size = batch_size, shuffle = True, drop_last = True, num_workers = num_workers, pin_memory = num_workers > 0, persistent_workers = num_workers > 0)
 
         self.model, self.optimizer, self.dl = self.accelerator.prepare(self.model, self.optimizer, self.dl)
 
