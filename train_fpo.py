@@ -1,8 +1,33 @@
+# /// script
+# dependencies = [
+#   "adam-atan2-pytorch",
+#   "einops",
+#   "einx",
+#   "ema-pytorch",
+#   "fire",
+#   "gymnasium[box2d]",
+#   "hl-gauss-pytorch",
+#   "hyper-connections",
+#   "moviepy",
+#   "numpy",
+#   "rectified-flow-pytorch",
+#   "torch",
+#   "tqdm",
+#   "x-ppo"
+# ]
+# ///
+
 # Flow Policy Optimization (FPO)
 # McAllister et al. https://arxiv.org/abs/2507.21053
 
 # Flow Policy Gradients for Legged Robots (FPO++)
-# https://openreview.net/forum?id=BA6n0nmagi
+# Yi et al. https://openreview.net/forum?id=BA6n0nmagi
+
+# Flow-DPPO - Divergence Proximal Policy Optimization for Flow Matching Models
+# Ping et al. https://arxiv.org/abs/2606.11025
+
+# ReFPO - Reflow Regularization for Flow Matching Policy Gradients
+# Wang et al. https://arxiv.org/abs/2606.21086
 
 from __future__ import annotations
 
@@ -36,7 +61,7 @@ from hl_gauss_pytorch import HLGaussLoss
 
 from hyper_connections import HyperConnections
 
-from assoc_scan import AssocScan
+from x_ppo import calc_gae, hpo_actor_loss, ppo_actor_loss
 
 from rectified_flow_pytorch.nano_flow import NanoFlow
 
@@ -52,6 +77,7 @@ Memory = namedtuple('Memory', [
     'learnable',
     'state',
     'action',
+    'noise',
     'past_action',
     'reward',
     'is_boundary',
@@ -238,33 +264,6 @@ class Critic(Module):
         value = self.value_head(hidden)
         return value
 
-# GAE
-
-def calc_gae(
-    rewards,
-    values,
-    masks,
-    gamma = 0.99,
-    lam = 0.95,
-    use_accelerated = None
-):
-    assert values.shape[-1] == rewards.shape[-1]
-    use_accelerated = default(use_accelerated, rewards.is_cuda)
-
-    values = F.pad(values, (0, 1), value = 0.)
-    values, values_next = values[:-1], values[1:]
-
-    delta = rewards + gamma * values_next * masks - values
-    gates = gamma * lam * masks
-
-    scan = AssocScan(reverse = True, use_accelerated = use_accelerated)
-
-    gae = scan(gates, delta)
-
-    returns = gae + values
-
-    return returns
-
 # agent
 
 class PPO(Module):
@@ -284,13 +283,16 @@ class PPO(Module):
         cautious_factor,
         eps_clip,
         ema_decay,
-        advantage_offset_constant = 0., # the paper talked about some constant to make it non-negative to fit intuition, and yet in the appendix claimed empirically it made no difference
+        advantage_offset_constant = 0.35,
+        use_hpo = True,
         ema_kwargs: dict = dict(
             update_model_with_ema_every = 1000
         ),
-        reward_range = (-100., 100.),
+        reward_range = (-300., 300.),
         num_noise_monte_carlo = 4,
-        loss_diff_clamp_value = 8.,
+        loss_diff_clamp_value = 4.,
+        vel_kl_threshold = 0.08,
+        reflow_weight = 0.08,
         save_path = './fpo.pt'
     ):
         super().__init__()
@@ -304,9 +306,12 @@ class PPO(Module):
 
         self.num_noise_monte_carlo = num_noise_monte_carlo
 
-        # clamps
+        # clamps and flow-dppo / refpo hparams
 
+        self.use_hpo = use_hpo
         self.loss_diff_clamp_value = loss_diff_clamp_value
+        self.vel_kl_threshold = vel_kl_threshold
+        self.reflow_weight = reflow_weight
 
         # https://arxiv.org/abs/2403.03950
 
@@ -366,6 +371,7 @@ class PPO(Module):
             learnable,
             states,
             action,
+            rollout_noise,
             past_action,
             rewards,
             is_boundaries,
@@ -395,6 +401,7 @@ class PPO(Module):
 
         states = to_torch_tensor(states)
         action = to_torch_tensor(action)
+        rollout_noise = to_torch_tensor(rollout_noise)
         past_action = to_torch_tensor(past_action)
         old_values = to_torch_tensor(values)
 
@@ -406,7 +413,7 @@ class PPO(Module):
         # prepare dataloader for policy phase training
 
         learnable = tensor(learnable).to(device)
-        data = (states, action, past_action, returns, old_values)
+        data = (states, action, rollout_noise, past_action, returns, old_values)
         data = tuple(t[learnable] for t in data)
 
         dataset = TensorDataset(*data)
@@ -418,52 +425,61 @@ class PPO(Module):
         n_mc = self.num_noise_monte_carlo
         clamp_value = self.loss_diff_clamp_value
 
-        with tqdm(range(self.epochs)) as pbar:
-            for i, (states, action, past_action, returns, old_values) in enumerate(dl):
+        for _ in tqdm(range(self.epochs)):
+            for i, (states, action, rollout_noise, past_action, returns, old_values) in enumerate(dl):
 
                 batch = action.shape[0]
 
                 times = torch.rand((batch * n_mc,), device = action.device)
 
                 expanded_states = repeat(states, 'b ... -> (b n) ...', n = n_mc)
-                action = repeat(action, 'b ... -> (b n) ...', n = n_mc)
+                expanded_action = repeat(action, 'b ... -> (b n) ...', n = n_mc)
 
-                noise = torch.randn_like(action)
+                noise = torch.randn_like(expanded_action)
 
-                actor_forward_kwargs = dict(state = expanded_states, noise = noise, times = times, loss_reduction = 'none')
+                actor_forward_kwargs = dict(state = expanded_states, noise = noise, times = times, loss_reduction = 'none', return_pred_flow = True)
 
-                loss = self.actor(action, **actor_forward_kwargs)
+                loss, pred_flow = self.actor(expanded_action, **actor_forward_kwargs)
 
                 with torch.no_grad():
-                    old_loss = old_actor(action, **actor_forward_kwargs)
+                    old_loss, old_pred_flow = old_actor(expanded_action, **actor_forward_kwargs)
 
                 scalar_old_values = hl_gauss(old_values)
 
-                # calculate clipped surrogate objective, but following Algorithm 1 Line 9 formulation for flow policy optimization (FPO)
+                # calculate advantages
 
-                orig_loss_diff = old_loss.detach() - loss
-                clamped_loss_diff = orig_loss_diff.clamp(-clamp_value, clamp_value)
+                raw_advantages = returns - scalar_old_values.detach()
+                advantages = normalize(raw_advantages) + self.advantage_offset_constant
+                expanded_advantages = repeat(advantages, 'b -> (b n)', n = n_mc)
 
-                loss_diff = orig_loss_diff + (clamped_loss_diff - orig_loss_diff).detach()
+                # flow-dppo - Ping et al. https://arxiv.org/abs/2606.11025
 
-                ratios = loss_diff.exp()
+                vel_kl = 0.5 * (pred_flow - old_pred_flow.detach()).square().mean(dim = -1)
+                log_diff = (old_loss.detach() - loss).sum(dim = -1)
 
-                advantages = normalize(returns - scalar_old_values.detach()) + self.advantage_offset_constant
+                moving_away = ((expanded_advantages > 0.) & (log_diff > 0.)) | ((expanded_advantages < 0.) & (log_diff < 0.))
+                keep_mask = ~(moving_away & (vel_kl > self.vel_kl_threshold))
 
-                advantages = advantages[..., None]
+                # actor loss - Yi et al. https://openreview.net/forum?id=BA6n0nmagi
 
-                advantages = repeat(advantages, 'b ... -> (b n) ...', n = n_mc)
+                actor_loss_fn = hpo_actor_loss if self.use_hpo else partial(ppo_actor_loss, dual_clip = True)
 
-                # SPO - Xie et al. https://arxiv.org/abs/2401.16025v9
-                # Asymmetric SPO https://openreview.net/forum?id=BA6n0nmagi
+                policy_loss = actor_loss_fn(
+                    action_log_probs = -loss,
+                    old_action_log_probs = -old_loss.detach(),
+                    advantages = expanded_advantages,
+                    mask = keep_mask,
+                    eps_clip = eps_clip,
+                    log_ratio_clamp = (-clamp_value, clamp_value)
+                ).mean()
 
-                spo_policy_loss = ratios * advantages - (ratios - 1.).square() * advantages.abs() / (2 * self.eps_clip)
+                # refpo - Wang et al. https://arxiv.org/abs/2606.21086
 
-                ppo_policy_loss = torch.min(ratios * advantages, ratios.clamp(1. - eps_clip, 1. + eps_clip) * advantages)
-
-                policy_loss = torch.where(advantages > 0., ppo_policy_loss, spo_policy_loss)
-
-                policy_loss = -policy_loss.sum(dim = -1).mean()
+                if self.reflow_weight > 0.:
+                    reflow_times = torch.rand((batch,), device = action.device)
+                    reflow_loss = self.actor(action, state = states, noise = rollout_noise, times = reflow_times, loss_reduction = 'none')
+                    pos_gate = F.softplus(advantages).detach()
+                    policy_loss = policy_loss + self.reflow_weight * (reflow_loss.sum(dim = -1) * pos_gate).mean()
 
                 policy_loss.backward()
                 self.opt_actor.step()
@@ -477,9 +493,6 @@ class PPO(Module):
                 critic_loss.backward()
                 self.opt_critic.step()
                 self.opt_critic.zero_grad()
-
-            pbar.set_description(f'actor loss: {policy_loss.item():.3f} | critic loss: {critic_loss.item():.3f}')
-            pbar.update(1)
 
 # main
 
@@ -501,7 +514,7 @@ def main(
     ema_decay = 0.9,
     update_timesteps = 5000,
     memory_buffer_size = 10_000,
-    advantage_offset_constant = 0.,
+    advantage_offset_constant = 0.35,
     epochs = 4,
     seed = None,
     render = True,
@@ -595,31 +608,27 @@ def main(
 
             reward = float(reward)
 
-            memory = Memory(True, state, action, past_action, reward, terminated, value)
+            # determine if truncating, either from environment or learning phase of the agent
+
+            updating_agent = divisible_by(time, update_timesteps)
+            done = terminated or truncated or is_last or updating_agent
+
+            # take care of truncated by bootstrapping the next value for GAE
+
+            if done and not terminated:
+                next_value = agent.ema_critic.forward_eval(cat((next_state, action)))
+                scalar_next_value = agent.critic_hl_gauss_loss(next_value).item()
+                reward += agent.gamma * scalar_next_value
+
+            memory = Memory(True, state, action, noise, past_action, reward, done, value)
 
             memories.append(memory)
 
             state = next_state
             past_action = action
 
-            # determine if truncating, either from environment or learning phase of the agent
-
-            updating_agent = divisible_by(time, update_timesteps)
-            done = terminated or truncated or updating_agent
-
-            # take care of truncated by adding a non-learnable memory storing the next value for GAE
-
-            if done and not terminated:
-                next_value = agent.ema_critic.forward_eval(cat((state, past_action)))
-
-                bootstrap_value_memory = memory._replace(
-                    state = state,
-                    learnable = False,
-                    is_boundary = True,
-                    value = next_value,
-                )
-
-                memories.append(bootstrap_value_memory)
+            if done or is_last:
+                all_rewards.append(cum_rewards)
 
             # updating of the agent
 
@@ -633,11 +642,6 @@ def main(
 
                 memories.clear()
                 all_rewards.clear()
-
-            # break if done
-
-            if done or is_last:
-                all_rewards.append(cum_rewards)
 
             if done:
                 break

@@ -440,3 +440,39 @@ $ python train_oxford.py
     url     = {https://arxiv.org/abs/2608.08888},
 }
 ```
+
+```bibtex
+@misc{ping2026flowdppo,
+    title   = {Flow-DPPO: Divergence Proximal Policy Optimization for Flow Matching Models},
+    author  = {Hao Ping and others},
+    year    = {2026},
+    eprint  = {2606.11025},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.LG},
+    url     = {https://arxiv.org/abs/2606.11025},
+}
+```
+
+```bibtex
+@misc{wang2026refpo,
+    title   = {ReFPO: Reflow Regularization for Flow Matching Policy Gradients},
+    author  = {Yifan Wang and others},
+    year    = {2026},
+    eprint  = {2606.21086},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.LG},
+    url     = {https://arxiv.org/abs/2606.21086},
+}
+```
+
+```bibtex
+@misc{evohil2026,
+    title   = {EvoHIL: Evolutionary and Prefix-Aware Horizon Flow Policy Optimization},
+    author  = {Zixuan Li and others},
+    year    = {2026},
+    eprint  = {2608.03872},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.RO},
+    url     = {https://arxiv.org/abs/2608.03872},
+}
+```

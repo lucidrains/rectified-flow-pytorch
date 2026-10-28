@@ -41,7 +41,7 @@ class NanoFlow(Module):
 
         self.loss_fn = loss_fn
 
-    def predict_flow(self, state, time, eps = 1e-5, **kwargs):
+    def predict_flow(self, state, time, /, eps = 1e-5, **kwargs):
         model_output = self.model(state, **kwargs)
 
         if not self.predict_clean:
@@ -107,7 +107,7 @@ class NanoFlow(Module):
 
         return out, init
 
-    def forward(self, data, noise = None, times = None, loss_reduction = 'mean', **kwargs):
+    def forward(self, data, noise = None, times = None, loss_reduction = 'mean', return_pred_flow = False, **kwargs):
         data = self.normalize_data_fn(data)
 
         # shapes and variables
@@ -135,7 +135,9 @@ class NanoFlow(Module):
         else:
             pred_flow = model_output
 
-        return self.loss_fn(flow, pred_flow, reduction = loss_reduction)
+        loss = self.loss_fn(flow, pred_flow, reduction = loss_reduction)
+
+        return (loss, pred_flow) if return_pred_flow else loss
 
 # quick test
 

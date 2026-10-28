@@ -10,6 +10,7 @@
 #   'accelerate',
 #   'memmap-replay-buffer',
 #   'x-mlps-pytorch',
+#   'x-ppo',
 #   'moviepy'
 # ]
 # ///
@@ -42,7 +43,7 @@ from einops import rearrange
 from x_mlps_pytorch import MLP
 from rectified_flow_pytorch.value_flow import ValueFlow
 from rectified_flow_pytorch.rectified_flow import Unet
-from assoc_scan import AssocScan
+from x_ppo import calc_gae
 import torch.nn.functional as F
 
 # helpers
@@ -134,23 +135,6 @@ class CriticBackbone(nn.Module):
             h = h + self.action_emb(action.long())
 
         return self.to_state_velocity(h), self.to_return_velocity(h)
-
-# gae
-
-def calc_gae(rewards, values, last_value, masks, gamma=0.99, lam=0.95, use_accelerated=None):
-    assert values.shape[-1] == rewards.shape[-1]
-    use_accelerated = default(use_accelerated, rewards.is_cuda)
-
-    values = F.pad(values, (0, 1), value = float(last_value))
-    values_current, values_next = values[..., :-1], values[..., 1:]
-
-    delta = rewards + gamma * values_next * masks - values_current
-    gates = gamma * lam * masks
-
-    scan = AssocScan(reverse = True, use_accelerated = use_accelerated)
-    gae = scan(gates, delta)
-
-    return gae, gae + values_current
 
 # training
 
@@ -298,7 +282,15 @@ def main(
 
             buffer.data['value'][ep_idx, :T] = values_t.cpu().numpy()
 
-        advs, returns = calc_gae(rewards_t, values_t, last_value, 1. - dones_t, gamma, lam)
+        returns, advs = calc_gae(
+            rewards = rewards_t,
+            values = values_t,
+            masks = 1. - dones_t,
+            next_value = last_value,
+            gamma = gamma,
+            lam = lam,
+            return_advantages = True
+        )
 
         buffer.data['adv'][ep_idx, :T] = advs.cpu().numpy()
         buffer.data['target_ret'][ep_idx, :T] = returns.cpu().numpy()

@@ -1,3 +1,23 @@
+# /// script
+# dependencies = [
+#   "torch",
+#   "numpy",
+#   "gymnasium[box2d]",
+#   "tqdm",
+#   "fire",
+#   "einops",
+#   "einx",
+#   "ema-pytorch",
+#   "adam-atan2-pytorch",
+#   "hl-gauss-pytorch",
+#   "hyper-connections",
+#   "mean-conc-beta",
+#   "accelerate",
+#   "moviepy",
+#   "x-ppo",
+# ]
+# ///
+
 """
 Probabilistic Flow PPO
 
@@ -37,7 +57,7 @@ from hl_gauss_pytorch import HLGaussLoss
 
 from hyper_connections import HyperConnections
 
-from assoc_scan import AssocScan
+from x_ppo import calc_gae
 
 from accelerate import Accelerator
 
@@ -54,6 +74,7 @@ StepMemory = namedtuple('StepMemory', [
     'past_action',
     'reward',
     'mask',
+    'done_mask',
     'value',
     'next_value',
 ])
@@ -354,30 +375,6 @@ class Critic(Module):
         value = self.value_head(hidden)
         return value
 
-# gae
-
-def calc_gae(
-    rewards,
-    values,
-    next_values,
-    masks,
-    gamma = 0.99,
-    lam = 0.95,
-    use_accelerated = None
-):
-    use_accelerated = default(use_accelerated, rewards.is_cuda)
-
-    delta = rewards + gamma * next_values * masks - values
-    gates = gamma * lam * masks
-
-    scan = AssocScan(reverse = True, use_accelerated = use_accelerated)
-
-    gae = scan(gates, delta)
-
-    returns = gae + values
-
-    return returns, gae
-
 # ppo
 
 class PPO(Module):
@@ -499,6 +496,7 @@ class PPO(Module):
 
         rewards = tensor([m.reward for m in step_memories], device = device)
         masks = tensor([m.mask for m in step_memories], device = device)
+        done_masks = tensor([m.done_mask for m in step_memories], device = device)
         values = stack([m.value for m in step_memories])
         next_values = stack([m.next_value for m in step_memories])
 
@@ -511,14 +509,16 @@ class PPO(Module):
                 values = scalar_values,
                 next_values = scalar_next_values,
                 masks = masks,
+                done_masks = done_masks,
                 gamma = self.gamma,
                 lam = self.lam,
-                use_accelerated = False
+                use_accelerated = False,
+                return_advantages = True
             )
 
         norm_advantages = normalize(gae) + self.advantage_offset_constant
 
-        # actor dataset
+        # actor dataset - evohil https://arxiv.org/abs/2608.03872
 
         all_chunk_states = []
         all_chunk_actions = []
@@ -800,6 +800,7 @@ def main(
                 episode_done = step_terminated or step_truncated
 
                 mask = 0. if step_terminated else 1.
+                done_mask = 0. if episode_done else 1.
 
                 if step_terminated:
                     next_value = torch.zeros_like(value)
@@ -814,6 +815,7 @@ def main(
                     past_action = sub_past_action,
                     reward = float(step_reward),
                     mask = mask,
+                    done_mask = done_mask,
                     value = value,
                     next_value = next_value,
                 ))
