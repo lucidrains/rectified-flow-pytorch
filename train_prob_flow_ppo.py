@@ -14,6 +14,7 @@
 #   "mean-conc-beta",
 #   "accelerate",
 #   "moviepy",
+#   "torch-einops-utils",
 #   "x-ppo",
 # ]
 # ///
@@ -58,6 +59,8 @@ from hl_gauss_pytorch import HLGaussLoss
 from hyper_connections import HyperConnections
 
 from x_ppo import calc_gae
+
+from torch_einops_utils import batched_index_select
 
 from accelerate import Accelerator
 
@@ -556,14 +559,9 @@ class PPO(Module):
         critic_ds = TensorDataset(critic_states, critic_past_actions, returns)
         critic_dl = DataLoader(critic_ds, batch_size = self.minibatch_size, shuffle = True)
 
-        # sync online models to ema
-
-        self.ema_actor.copy_params_from_ema_to_model()
-        self.ema_critic.copy_params_from_ema_to_model()
-
         # reference actor
 
-        old_actor = deepcopy(self.ema_actor.ema_model)
+        old_actor = deepcopy(self.actor)
         old_actor.eval()
 
         n_mc = self.num_noise_monte_carlo
@@ -609,14 +607,19 @@ class PPO(Module):
 
                     # explorative modeling (xm) - alexi gladstone et al.
 
-                    candidate_losses = sub_loss.sum(dim = -1) / expanded_masks.sum(dim = -1).clamp(min = 1)
-                    candidate_losses = rearrange(candidate_losses, '(b n) -> b n', b = batch, n = n_mc)
+                    normalizer = expanded_masks.sum(dim = -1).clamp(min = 1)
+
+                    nll = (-log_prob).masked_fill(~expanded_masks, 0.).sum(dim = -1) / normalizer
+                    nll = rearrange(nll, '(b n) -> b n', b = batch, n = n_mc)
+
+                    losses = sub_loss.sum(dim = -1) / normalizer
+                    losses = rearrange(losses, '(b n) -> b n', b = batch, n = n_mc)
 
                     if exists(self.xm_temperature) and self.xm_temperature > 0.:
-                        weights = F.softmin(candidate_losses / self.xm_temperature, dim = -1)
-                        policy_loss = (weights.detach() * candidate_losses).sum(dim = -1).mean()
+                        weights = F.softmin(nll / self.xm_temperature, dim = -1)
+                        policy_loss = (weights.detach() * losses).sum(dim = -1).mean()
                     else:
-                        policy_loss = candidate_losses.amin(dim = -1).mean()
+                        policy_loss = batched_index_select(losses, nll.argmin(dim = -1)).mean()
 
                     policy_loss.backward()
                     self.opt_actor.step()
@@ -639,7 +642,7 @@ class PPO(Module):
 
 def main(
     env_name = 'LunarLander-v3',
-    num_episodes = 50000,
+    num_episodes = 2000,
     max_timesteps = 500,
     actor_hidden_dim = 32,
     actor_flow_timesteps = 4,
@@ -673,6 +676,7 @@ def main(
     init_conc = 2.,
     unimodal = True,
     reward_range = None,
+    num_noise_monte_carlo = 4,
     xm_temperature = 0.05,
 ):
     accelerator = Accelerator(cpu = cpu)
@@ -730,6 +734,7 @@ def main(
         ema_decay,
         advantage_offset_constant,
         eps = eps,
+        num_noise_monte_carlo = num_noise_monte_carlo,
         chunk_size = chunk_size,
         reward_range = reward_range,
         bounds = bounds,
