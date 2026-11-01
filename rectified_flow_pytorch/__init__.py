@@ -34,3 +34,5 @@ from rectified_flow_pytorch.ua_flow import UAFlow
 from rectified_flow_pytorch.lap_flow import LapFlow, LapFlowDiT
 
 from rectified_flow_pytorch.xm_wrapper import XMWrapper
+
+from rectified_flow_pytorch.xm_refinement_wrapper import XMRefinementWrapper, XMRefinementInfo
