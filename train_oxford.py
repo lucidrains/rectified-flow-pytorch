@@ -37,6 +37,7 @@ def train(
     batch_size = 16,
     num_train_steps = 70_000,
     sample_temperature = 1.5,
+    freeze_normalizer_after_steps = 1000,
     save_results_every = 100,
     results_folder = './results',
     clear_results_folder = True
@@ -50,7 +51,12 @@ def train(
         mean_variance_net = False
     )
 
-    rectified_flow = RectifiedFlow(model, predict = 'clean')
+    rectified_flow = RectifiedFlow(
+        model,
+        predict = 'clean',
+        data_shape = (3, image_size, image_size),
+        auto_normalize = True
+    )
 
     trainer = Trainer(
         rectified_flow,
@@ -58,6 +64,7 @@ def train(
         batch_size = batch_size,
         num_train_steps = num_train_steps,
         sample_temperature = sample_temperature,
+        freeze_normalizer_after_steps = freeze_normalizer_after_steps,
         save_results_every = save_results_every,
         results_folder = results_folder,
         clear_results_folder = clear_results_folder

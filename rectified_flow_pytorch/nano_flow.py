@@ -24,6 +24,7 @@ class NanoFlow(Module):
         data_shape = None,
         normalize_data_fn = identity,
         unnormalize_data_fn = identity,
+        normalizer: Module | None = None,
         predict_clean = False,
         max_timesteps = 100,
         loss_fn = F.mse_loss
@@ -33,8 +34,19 @@ class NanoFlow(Module):
         self.times_cond_kwarg = times_cond_kwarg
         self.data_shape = data_shape
 
-        self.normalize_data_fn = normalize_data_fn
-        self.unnormalize_data_fn = unnormalize_data_fn
+        # optional running normalizer, e.g. WelfordNormalizer, takes over the normalize fns
+
+        self.normalizer = normalizer
+
+        if exists(normalizer):
+            assert normalize_data_fn in (None, identity), 'normalizer manages normalize_data_fn'
+            assert unnormalize_data_fn in (None, identity), 'normalizer manages unnormalize_data_fn'
+
+            normalize_data_fn = normalizer.normalize
+            unnormalize_data_fn = normalizer.denormalize
+
+        self.normalize_data_fn = default(normalize_data_fn, identity)
+        self.unnormalize_data_fn = default(unnormalize_data_fn, identity)
 
         self.predict_clean = predict_clean # predicting x0
         self.max_timesteps = max_timesteps
@@ -108,7 +120,7 @@ class NanoFlow(Module):
         return out, init
 
     def forward(self, data, noise = None, times = None, loss_reduction = 'mean', return_pred_flow = False, **kwargs):
-        data = self.normalize_data_fn(data)
+        data = self.normalizer(data) if exists(self.normalizer) else self.normalize_data_fn(data)
 
         # shapes and variables
 

@@ -28,6 +28,7 @@ from scipy.optimize import linear_sum_assignment
 
 from rectified_flow_pytorch.nano_flow import NanoFlow
 from rectified_flow_pytorch.self_flow import SelfFlow
+from rectified_flow_pytorch.welford_normalizer import WelfordNormalizer
 
 # helpers
 
@@ -166,6 +167,8 @@ class RectifiedFlow(Module):
         consistency_loss_weight = 1.,
         data_normalize_fn = normalize_to_neg_one_to_one,
         data_unnormalize_fn = unnormalize_to_zero_to_one,
+        auto_normalize: bool | WelfordNormalizer = False,
+        normalize_kwargs: dict = dict(),
         clip_during_sampling = False,
         clip_values: tuple[float, float] = (-1., 1.),
         clip_flow_during_sampling = None, # this seems to help a lot when training with predict epsilon, at least for me
@@ -266,6 +269,18 @@ class RectifiedFlow(Module):
         self.immiscible = immiscible
 
         # normalizing fn
+
+        self.normalizer = None
+
+        if auto_normalize:
+            assert data_normalize_fn in (None, identity, normalize_to_neg_one_to_one), 'auto_normalize manages data_normalize_fn'
+            assert data_unnormalize_fn in (None, identity, unnormalize_to_zero_to_one), 'auto_normalize manages data_unnormalize_fn'
+
+            normalizer = auto_normalize if isinstance(auto_normalize, WelfordNormalizer) else WelfordNormalizer(data_shape = data_shape, **normalize_kwargs)
+
+            self.normalizer = normalizer
+            data_normalize_fn = normalizer.normalize
+            data_unnormalize_fn = normalizer.denormalize
 
         self.data_normalize_fn = default(data_normalize_fn, identity)
         self.data_unnormalize_fn = default(data_unnormalize_fn, identity)
@@ -405,6 +420,7 @@ class RectifiedFlow(Module):
         # start with random gaussian noise or image
 
         init = image if reverse else default(noise, torch.randn((batch_size, *data_shape), device = self.device))
+        init = self.data_normalize_fn(init) if reverse else init
 
         # time steps
 
@@ -421,7 +437,9 @@ class RectifiedFlow(Module):
 
         self.train(was_training)
 
-        return self.data_unnormalize_fn(sampled_data)
+        # reverse sampling returns a normalized latent, forward sampling returns data
+
+        return sampled_data if reverse else self.data_unnormalize_fn(sampled_data)
 
     def forward(
         self,
@@ -433,7 +451,7 @@ class RectifiedFlow(Module):
     ):
         batch, *data_shape = data.shape
 
-        data = self.data_normalize_fn(data)
+        data = self.normalizer(data) if exists(self.normalizer) else self.data_normalize_fn(data)
 
         self.data_shape = default(self.data_shape, data_shape)
 
@@ -1155,6 +1173,7 @@ class Trainer(Module):
         grad_accum_every = 1,
         max_grad_norm = 0.5,
         clear_results_folder = False,
+        freeze_normalizer_after_steps: int | None = None,
         save_sample_fn: Callable | None = None
     ):
         super().__init__()
@@ -1188,6 +1207,13 @@ class Trainer(Module):
                 forward_method_names = ('sample',),
                 **ema_kwargs
             )
+
+            # running stats are preprocessing state, not model weights - share them with the ema model
+
+            normalizer = getattr(rectified_flow, 'normalizer', None)
+
+            if exists(normalizer) and exists(self.ema_model.ema_model):
+                self.ema_model.ema_model.normalizer = normalizer
 
             self.ema_model.to(self.accelerator.device)
 
@@ -1227,11 +1253,21 @@ class Trainer(Module):
         assert self.results_folder.is_dir()
 
         self.max_grad_norm = max_grad_norm
+        self.freeze_normalizer_after_steps = freeze_normalizer_after_steps
         self.save_sample_fn = save_sample_fn
 
     @property
     def is_main(self):
         return self.accelerator.is_main_process
+
+    def maybe_freeze_normalizer(self, model, step):
+        if not exists(self.freeze_normalizer_after_steps) or step < self.freeze_normalizer_after_steps:
+            return
+
+        normalizer = getattr(model, 'normalizer', None)
+
+        if exists(normalizer):
+            normalizer.freeze()
 
     def save(self, path):
         if not self.is_main:
@@ -1355,6 +1391,8 @@ class Trainer(Module):
                 self.optimizer.zero_grad()
 
             unwrapped_model = self.accelerator.unwrap_model(self.model)
+
+            self.maybe_freeze_normalizer(unwrapped_model, step)
 
             if hasattr(unwrapped_model, 'post_training_step_update'):
                 unwrapped_model.post_training_step_update()
