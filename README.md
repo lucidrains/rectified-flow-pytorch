@@ -476,3 +476,25 @@ $ python train_oxford.py
     url     = {https://arxiv.org/abs/2608.03872},
 }
 ```
+
+```bibtex
+@inproceedings{Huang2025TheGI,
+    title   = {The GAN is dead; long live the GAN! A Modern GAN Baseline},
+    author  = {Yiwen Huang and Aaron Gokaslan and Volodymyr Kuleshov and James Tompkin},
+    year    = {2025},
+    url     = {https://api.semanticscholar.org/CorpusID:275405495}
+}
+```
+
+```bibtex
+@inproceedings{Shlenskii2026MidpointGM,
+    title   = {Midpoint Generative Models},
+    author  = {Daniil Shlenskii and Nikita Gushchin and Lev Novitskiy and Dmitry V. Dylov and Alexander Korotin},
+    booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
+    year    = {2026},
+    eprint  = {2605.29920},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.LG},
+    url     = {https://arxiv.org/abs/2605.29920},
+}
+```
