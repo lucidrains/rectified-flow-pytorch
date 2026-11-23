@@ -272,4 +272,3 @@ if __name__ == '__main__':
     test_xm_refinement_wrapper_same_and_next_batch_scoring()
     test_xm_refinement_wrapper_copies_optimizer_state()
     print("All XM wrapper tests passed successfully!")
-

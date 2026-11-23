@@ -454,13 +454,13 @@ $ python train_oxford.py
 ```
 
 ```bibtex
-@misc{wang2026refpo,
+@misc{wang2026refporeflowregularizationflow,
     title   = {ReFPO: Reflow Regularization for Flow Matching Policy Gradients},
-    author  = {Yifan Wang and others},
+    author  = {Ge Wang and Yibo Peng and Fan Feng and Shenhao Yan and Chengsi Yao and Jiahao Yang and Honghao Cai and Yiming Zhao and Xi Li and Jinke Ren and Shuguang Cui and Yatong Han and Zhen Li},
     year    = {2026},
     eprint  = {2606.21086},
     archivePrefix = {arXiv},
-    primaryClass = {cs.LG},
+    primaryClass = {cs.RO},
     url     = {https://arxiv.org/abs/2606.21086},
 }
 ```
