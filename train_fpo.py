@@ -8,9 +8,9 @@
 #   "gymnasium[box2d]",
 #   "hl-gauss-pytorch",
 #   "hyper-connections",
+#   "mean-conc-beta",
 #   "moviepy",
 #   "numpy",
-#   "rectified-flow-pytorch",
 #   "torch",
 #   "tqdm",
 #   "x-ppo"
@@ -20,8 +20,8 @@
 # Flow Policy Optimization (FPO)
 # McAllister et al. https://arxiv.org/abs/2507.21053
 
-# Flow Policy Gradients for Legged Robots (FPO++)
-# Yi et al. https://openreview.net/forum?id=BA6n0nmagi
+# Flow Policy Gradients for Robot Control (FPO++)
+# Yi et al. https://arxiv.org/abs/2602.02481
 
 # Flow-DPPO - Divergence Proximal Policy Optimization for Flow Matching Models
 # Ping et al. https://arxiv.org/abs/2606.11025
@@ -31,53 +31,38 @@
 
 from __future__ import annotations
 
-import fire
+from collections import namedtuple
 from pathlib import Path
 from shutil import rmtree
-from copy import deepcopy
-from functools import partial
-from collections import deque, namedtuple
-from random import randrange
-
-import numpy as np
-from tqdm import tqdm
-
-import torch
-from torch import nn, tensor, is_tensor, cat, stack
-import torch.nn.functional as F
-from torch.nn import Module, ModuleList
-from torch.utils.data import TensorDataset, DataLoader
-from torch.distributions import Categorical
-from torch.utils._pytree import tree_map
 
 import einx
-from einops import reduce, repeat, einsum, rearrange, pack
-
-from ema_pytorch import EMA
-
-from adam_atan2_pytorch.adopt_atan2 import AdoptAtan2
-
-from hl_gauss_pytorch import HLGaussLoss
-
-from hyper_connections import HyperConnections
-
-from x_ppo import calc_gae, hpo_actor_loss, ppo_actor_loss
-
-from rectified_flow_pytorch.nano_flow import NanoFlow
-
+import fire
 import gymnasium as gym
+import numpy as np
+import torch
+import torch.nn.functional as F
+from adam_atan2_pytorch.adopt_atan2 import AdoptAtan2
+from einops import pack, rearrange, repeat
+from ema_pytorch import EMA
+from hl_gauss_pytorch import HLGaussLoss
+from hyper_connections import HyperConnections
+from mean_conc_beta import Beta
+from torch import cat, nn, stack, tensor
+from torch.distributions import Beta as TorchBeta, kl_divergence
+from torch.nn import Module, ModuleList
+from torch.utils.data import DataLoader, TensorDataset
+from tqdm import tqdm
+from x_ppo import calc_gae, ppo_actor_loss
 
 # constants
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
-# memory tuple
+# memory
 
 Memory = namedtuple('Memory', [
-    'learnable',
     'state',
     'action',
-    'noise',
     'past_action',
     'reward',
     'is_boundary',
@@ -98,67 +83,46 @@ def divisible_by(num, den):
 def normalize(t, eps = 1e-5):
     return (t - t.mean()) / (t.std() + eps)
 
-def is_between(mid, lo, hi):
-    return (lo < mid) & (mid < hi)
-
-def add_batch(t):
-    return rearrange(t, '... -> 1 ...')
-
-def remove_batch(t):
-    return rearrange(t, '1 ... -> ...')
-
-# SimBa - Kaist + SonyAI
+# SimBa - https://arxiv.org/abs/2410.09754
 
 class ReluSquared(Module):
     def forward(self, x):
-        return x.sign() * F.relu(x) ** 2
+        return F.relu(x).square()
 
 class SimBa(Module):
-
     def __init__(
         self,
         dim,
         dim_hidden = None,
         depth = 3,
-        dropout = 0.,
         expansion_factor = 2,
         num_residual_streams = 4
     ):
         super().__init__()
-        """
-        following the design of SimBa https://arxiv.org/abs/2410.09754v1
-        """
-
-        self.num_residual_streams = num_residual_streams
-
         dim_hidden = default(dim_hidden, dim * expansion_factor)
-
-        layers = []
+        dim_inner = dim_hidden * expansion_factor
 
         self.proj_in = nn.Linear(dim, dim_hidden)
 
-        dim_inner = dim_hidden * expansion_factor
+        init_hyper_conn, self.expand_stream, self.reduce_stream = HyperConnections.get_init_and_expand_reduce_stream_functions(
+            1,
+            num_fracs = num_residual_streams,
+            disable = num_residual_streams == 1
+        )
 
-        # hyper connections
-
-        init_hyper_conn, self.expand_stream, self.reduce_stream = HyperConnections.get_init_and_expand_reduce_stream_functions(1, num_fracs = num_residual_streams, disable = num_residual_streams == 1)
-
-        for ind in range(depth):
-
-            layer = nn.Sequential(
-                nn.RMSNorm(dim_hidden),
-                nn.Linear(dim_hidden, dim_inner),
-                ReluSquared(),
-                nn.Linear(dim_inner, dim_hidden),
-                nn.Dropout(dropout),
+        self.layers = ModuleList([
+            init_hyper_conn(
+                dim = dim_hidden,
+                layer_index = ind,
+                branch = nn.Sequential(
+                    nn.RMSNorm(dim_hidden),
+                    nn.Linear(dim_hidden, dim_inner),
+                    ReluSquared(),
+                    nn.Linear(dim_inner, dim_hidden),
+                )
             )
-
-            layer = init_hyper_conn(dim = dim_hidden, layer_index = ind, branch = layer)
-            layers.append(layer)
-
-        # final layer out
-
-        self.layers = ModuleList(layers)
+            for ind in range(depth)
+        ])
 
         self.final_norm = nn.RMSNorm(dim_hidden)
 
@@ -169,14 +133,12 @@ class SimBa(Module):
             x = rearrange(x, '... -> 1 ...')
 
         x = self.proj_in(x)
-
         x = self.expand_stream(x)
 
         for layer in self.layers:
             x = layer(x)
 
         x = self.reduce_stream(x)
-
         out = self.final_norm(x)
 
         if no_batch:
@@ -187,10 +149,7 @@ class SimBa(Module):
 # networks
 
 class RandomFourierEmbed(Module):
-    def __init__(
-        self,
-        dim
-    ):
+    def __init__(self, dim):
         super().__init__()
         assert divisible_by(dim, 2)
         self.register_buffer('weights', torch.randn(dim // 2))
@@ -206,9 +165,11 @@ class Actor(Module):
         state_dim,
         hidden_dim,
         num_actions,
+        bounds = (-1., 1.),
+        init_conc = 2.,
+        unimodal = True,
         dim_time = 16,
         mlp_depth = 3,
-        dropout = 0.1,
     ):
         super().__init__()
 
@@ -222,21 +183,85 @@ class Actor(Module):
             state_dim + dim_time + num_actions,
             dim_hidden = hidden_dim * 2,
             depth = mlp_depth,
-            dropout = dropout
         )
 
-        self.to_flow = nn.Sequential(
+        self.to_params = nn.Sequential(
             nn.Linear(hidden_dim * 2, hidden_dim),
             ReluSquared(),
-            nn.Linear(hidden_dim, num_actions)
+            nn.Linear(hidden_dim, num_actions * 2)
         )
+
+        nn.init.normal_(self.to_params[-1].weight, std = 0.01)
+        nn.init.zeros_(self.to_params[-1].bias)
+
+        self.beta = Beta(bounds = bounds, init_conc = init_conc, unimodal = unimodal)
 
     def forward(self, noised_actions, *, state, time):
         time_emb = self.to_time_emb(time)
-
         inp = cat((noised_actions, state, time_emb), dim = -1)
         hidden = self.net(inp)
-        return self.to_flow(hidden)
+
+        params = rearrange(self.to_params(hidden), '... (a d) -> ... a d', d = 2)
+        return self.beta(params)
+
+class BetaFlow(Module):
+    def __init__(
+        self,
+        model: Actor,
+        num_actions: int,
+        max_time = 0.75,
+        eps = 1e-5,
+    ):
+        super().__init__()
+        self.model = model
+        self.num_actions = num_actions
+        self.max_time = max_time
+        self.eps = eps
+
+    def clamp_to_support(self, x):
+        return x.clamp(self.model.beta.low + self.eps, self.model.beta.high - self.eps)
+
+    @torch.no_grad()
+    def sample(
+        self,
+        steps = 4,
+        batch_size = 1,
+        noise = None,
+        deterministic = False,
+        **kwargs
+    ):
+        device = next(self.model.parameters()).device
+        denoised = default(noise, torch.randn((batch_size, self.num_actions), device = device))
+
+        times = torch.arange(steps, device = device) / steps
+        delta = 1. / steps
+
+        for time in times:
+            dist = self.model(denoised, time = time.expand(batch_size), **kwargs)
+            pred_clean = dist.mean if deterministic else dist.sample()
+
+            flow = (pred_clean - denoised) / (1. - time).clamp(min = self.eps)
+            denoised = denoised + delta * flow
+
+        return self.clamp_to_support(denoised)
+
+    def forward(self, action, *, noise = None, times = None, **kwargs):
+        action = self.clamp_to_support(action)
+        batch, device = action.shape[0], action.device
+
+        times = default(times, torch.rand(batch, device = device) * self.max_time)
+        noise = default(noise, torch.randn_like(action))
+
+        padded_times = rearrange(times, 'b -> b 1')
+        noised = noise.lerp(action, padded_times)
+
+        dist = self.model(noised, time = times, **kwargs)
+        log_prob = dist.log_prob(action)
+
+        # unweighted clean-prediction reflow loss (ReFPO Eq. 226)
+        reflow_loss = F.mse_loss(dist.mean, action, reduction = 'none').sum(dim = -1)
+
+        return log_prob, dist, reflow_loss
 
 class Critic(Module):
     def __init__(
@@ -245,8 +270,7 @@ class Critic(Module):
         num_actions,
         hidden_dim,
         dim_pred = 1,
-        mlp_depth = 6, # recent paper has findings that show scaling critic is more important than scaling actor
-        dropout = 0.1,
+        mlp_depth = 6,
     ):
         super().__init__()
 
@@ -254,15 +278,12 @@ class Critic(Module):
             state_dim + num_actions,
             dim_hidden = hidden_dim,
             depth = mlp_depth,
-            dropout = dropout
         )
 
         self.value_head = nn.Linear(hidden_dim, dim_pred)
 
     def forward(self, x):
-        hidden = self.net(x)
-        value = self.value_head(hidden)
-        return value
+        return self.value_head(self.net(x))
 
 # agent
 
@@ -283,37 +304,40 @@ class PPO(Module):
         cautious_factor,
         eps_clip,
         ema_decay,
-        advantage_offset_constant = 0.35,
-        use_hpo = True,
+        bounds = (-1., 1.),
+        init_conc = 2.,
+        actor_flow_timesteps = 4,
         ema_kwargs: dict = dict(
             update_model_with_ema_every = 1000
         ),
         reward_range = (-300., 300.),
-        num_noise_monte_carlo = 4,
+        num_noise_monte_carlo = 8,
         loss_diff_clamp_value = 4.,
-        vel_kl_threshold = 0.08,
-        reflow_weight = 0.08,
+        kl_threshold = 0.05,
+        reflow_weight = 0.04,
+        entropy_coef = 0.01,
         save_path = './fpo.pt'
     ):
         super().__init__()
 
-        actor_network = Actor(state_dim, actor_hidden_dim, num_actions)
-        self.actor = NanoFlow(actor_network, data_shape = (num_actions,), times_cond_kwarg = 'time', loss_fn = F.huber_loss)
-
+        actor_network = Actor(
+            state_dim,
+            actor_hidden_dim,
+            num_actions,
+            bounds = bounds,
+            init_conc = init_conc,
+        )
+        max_time = 1. - 1. / max(actor_flow_timesteps, 2)
+        self.actor = BetaFlow(actor_network, num_actions = num_actions, max_time = max_time)
         self.critic = Critic(state_dim, num_actions, critic_hidden_dim, dim_pred = critic_pred_num_bins)
 
-        # num noise monte carlo
-
         self.num_noise_monte_carlo = num_noise_monte_carlo
-
-        # clamps and flow-dppo / refpo hparams
-
-        self.use_hpo = use_hpo
         self.loss_diff_clamp_value = loss_diff_clamp_value
-        self.vel_kl_threshold = vel_kl_threshold
+        self.kl_threshold = kl_threshold
         self.reflow_weight = reflow_weight
+        self.entropy_coef = entropy_coef
 
-        # https://arxiv.org/abs/2403.03950
+        # HL-Gauss categorical critic - https://arxiv.org/abs/2403.03950
 
         self.critic_hl_gauss_loss = HLGaussLoss(
             min_value = reward_range[0],
@@ -325,25 +349,20 @@ class PPO(Module):
         self.ema_actor = EMA(self.actor, beta = ema_decay, include_online_model = False, forward_method_names = ('sample',), **ema_kwargs)
         self.ema_critic = EMA(self.critic, beta = ema_decay, include_online_model = False, **ema_kwargs)
 
+        self.ema_actor.eval()
+        self.ema_critic.eval()
+
         self.opt_actor = AdoptAtan2(self.actor.parameters(), lr = lr, betas = betas, cautious_factor = cautious_factor)
         self.opt_critic = AdoptAtan2(self.critic.parameters(), lr = lr, betas = betas, cautious_factor = cautious_factor)
 
         self.ema_actor.add_to_optimizer_post_step_hook(self.opt_actor)
         self.ema_critic.add_to_optimizer_post_step_hook(self.opt_critic)
 
-        # learning hparams
-
         self.minibatch_size = minibatch_size
-
         self.epochs = epochs
-
         self.lam = lam
         self.gamma = gamma
-
         self.eps_clip = eps_clip
-
-        self.advantage_offset_constant = advantage_offset_constant
-
         self.save_path = Path(save_path)
 
     def save(self):
@@ -361,133 +380,116 @@ class PPO(Module):
         self.actor.load_state_dict(data['actor'])
         self.critic.load_state_dict(data['critic'])
 
+        self.ema_actor.copy_params_from_model_to_ema()
+        self.ema_critic.copy_params_from_model_to_ema()
+
     def learn(self, memories):
         eps_clip = self.eps_clip
         hl_gauss = self.critic_hl_gauss_loss
 
-        # retrieve and prepare data from memory for training
-
-        (
-            learnable,
-            states,
-            action,
-            rollout_noise,
-            past_action,
-            rewards,
-            is_boundaries,
-            values,
-        ) = zip(*memories)
-
-        masks = [(1. - float(is_boundary)) for is_boundary in is_boundaries]
-
-        # calculate generalized advantage estimate
-
-        scalar_values = hl_gauss(stack(values))
+        states, actions, past_actions, rewards, is_boundaries, values = zip(*memories)
+        masks = [(1. - float(b)) for b in is_boundaries]
 
         with torch.no_grad():
-            calc_gae_from_values = partial(calc_gae,
-                rewards = tensor(rewards).to(device),
-                masks = tensor(masks).to(device),
+            scalar_values = hl_gauss(stack(values))
+
+            returns, gae = calc_gae(
+                rewards = tensor(rewards, dtype = torch.float32, device = device),
+                values = scalar_values,
+                masks = tensor(masks, dtype = torch.float32, device = device),
                 lam = self.lam,
                 gamma = self.gamma,
-                use_accelerated = False
+                use_accelerated = False,
+                return_advantages = True
             )
 
-            returns = calc_gae_from_values(values = scalar_values)
+            advantages = normalize(gae)
 
-        # convert values to torch tensors
+        states = stack(states).to(device).detach()
+        actions = stack(actions).to(device).detach()
+        past_actions = stack(past_actions).to(device).detach()
 
-        to_torch_tensor = lambda t: stack(t).to(device).detach()
+        # ReFPO Algorithm 1: sample and freeze (tau_i, eps_i) per action and precompute old policy once before epochs
 
-        states = to_torch_tensor(states)
-        action = to_torch_tensor(action)
-        rollout_noise = to_torch_tensor(rollout_noise)
-        past_action = to_torch_tensor(past_action)
-        old_values = to_torch_tensor(values)
-
-        # deepcopy the actor for the reference actor
-
-        old_actor = deepcopy(self.actor)
-        old_actor.eval()
-
-        # prepare dataloader for policy phase training
-
-        learnable = tensor(learnable).to(device)
-        data = (states, action, rollout_noise, past_action, returns, old_values)
-        data = tuple(t[learnable] for t in data)
-
-        dataset = TensorDataset(*data)
-
-        dl = DataLoader(dataset, batch_size = self.minibatch_size, shuffle = True)
-
-        # policy phase training, similar to original PPO
-
+        num_samples = actions.shape[0]
         n_mc = self.num_noise_monte_carlo
         clamp_value = self.loss_diff_clamp_value
 
+        mc_times = torch.rand((num_samples, n_mc), device = device) * self.actor.max_time
+        mc_noise = torch.randn((num_samples, n_mc, actions.shape[-1]), device = device)
+
+        with torch.no_grad():
+            old_log_probs, old_dist, _ = self.actor(
+                repeat(actions, 'b ... -> (b n) ...', n = n_mc),
+                state = repeat(states, 'b ... -> (b n) ...', n = n_mc),
+                noise = rearrange(mc_noise, 'b n d -> (b n) d'),
+                times = rearrange(mc_times, 'b n -> (b n)')
+            )
+            old_log_probs = rearrange(old_log_probs, '(b n) d -> b n d', n = n_mc)
+            old_conc1 = rearrange(old_dist.base_dist.concentration1, '(b n) d -> b n d', n = n_mc)
+            old_conc0 = rearrange(old_dist.base_dist.concentration0, '(b n) d -> b n d', n = n_mc)
+
+        dataset = TensorDataset(states, actions, past_actions, returns, advantages, mc_times, mc_noise, old_log_probs, old_conc1, old_conc0)
+        dl = DataLoader(dataset, batch_size = self.minibatch_size, shuffle = True)
+
         for _ in tqdm(range(self.epochs)):
-            for i, (states, action, rollout_noise, past_action, returns, old_values) in enumerate(dl):
-
-                batch = action.shape[0]
-
-                times = torch.rand((batch * n_mc,), device = action.device)
-
+            for states, actions, past_actions, returns, advantages, times, noise, old_log_prob, old_conc1, old_conc0 in dl:
                 expanded_states = repeat(states, 'b ... -> (b n) ...', n = n_mc)
-                expanded_action = repeat(action, 'b ... -> (b n) ...', n = n_mc)
-
-                noise = torch.randn_like(expanded_action)
-
-                actor_forward_kwargs = dict(state = expanded_states, noise = noise, times = times, loss_reduction = 'none', return_pred_flow = True)
-
-                loss, pred_flow = self.actor(expanded_action, **actor_forward_kwargs)
-
-                with torch.no_grad():
-                    old_loss, old_pred_flow = old_actor(expanded_action, **actor_forward_kwargs)
-
-                scalar_old_values = hl_gauss(old_values)
-
-                # calculate advantages
-
-                raw_advantages = returns - scalar_old_values.detach()
-                advantages = normalize(raw_advantages) + self.advantage_offset_constant
+                expanded_actions = repeat(actions, 'b ... -> (b n) ...', n = n_mc)
                 expanded_advantages = repeat(advantages, 'b -> (b n)', n = n_mc)
 
-                # flow-dppo - Ping et al. https://arxiv.org/abs/2606.11025
+                times = rearrange(times, 'b n -> (b n)')
+                noise = rearrange(noise, 'b n d -> (b n) d')
+                old_log_prob = rearrange(old_log_prob, 'b n d -> (b n) d')
+                old_dist = TorchBeta(
+                    rearrange(old_conc1, 'b n d -> (b n) d'),
+                    rearrange(old_conc0, 'b n d -> (b n) d')
+                )
 
-                vel_kl = 0.5 * (pred_flow - old_pred_flow.detach()).square().mean(dim = -1)
-                log_diff = (old_loss.detach() - loss).sum(dim = -1)
+                log_prob, dist, reflow_loss = self.actor(
+                    expanded_actions,
+                    state = expanded_states,
+                    noise = noise,
+                    times = times
+                )
 
-                moving_away = ((expanded_advantages > 0.) & (log_diff > 0.)) | ((expanded_advantages < 0.) & (log_diff < 0.))
-                keep_mask = ~(moving_away & (vel_kl > self.vel_kl_threshold))
+                with torch.no_grad():
+                    # flow-dppo - exact analytical KL divergence mask - Ping et al. https://arxiv.org/abs/2606.11025
 
-                # actor loss - Yi et al. https://openreview.net/forum?id=BA6n0nmagi
+                    step_kl = kl_divergence(old_dist, dist.base_dist).sum(dim = -1)
+                    log_diff = (log_prob - old_log_prob).sum(dim = -1)
 
-                actor_loss_fn = hpo_actor_loss if self.use_hpo else partial(ppo_actor_loss, dual_clip = True)
+                    moving_away = (expanded_advantages * log_diff) > 0.
+                    keep_mask = ~(moving_away & (step_kl > self.kl_threshold))
 
-                policy_loss = actor_loss_fn(
-                    action_log_probs = -loss,
-                    old_action_log_probs = -old_loss.detach(),
+                # per-sample PPO actor loss - FPO++ (Yi et al. https://arxiv.org/abs/2602.02481)
+
+                policy_loss = ppo_actor_loss(
+                    action_log_probs = log_prob,
+                    old_action_log_probs = old_log_prob,
                     advantages = expanded_advantages,
-                    mask = keep_mask,
                     eps_clip = eps_clip,
+                    dual_clip = True,
                     log_ratio_clamp = (-clamp_value, clamp_value)
-                ).mean()
+                )
 
-                # refpo - Wang et al. https://arxiv.org/abs/2606.21086
+                policy_loss = torch.where(keep_mask, policy_loss, 0.).mean()
+
+                # refpo - unweighted reflow regularization reusing the same forward pass - Wang et al. https://arxiv.org/abs/2606.21086
 
                 if self.reflow_weight > 0.:
-                    reflow_times = torch.rand((batch,), device = action.device)
-                    reflow_loss = self.actor(action, state = states, noise = rollout_noise, times = reflow_times, loss_reduction = 'none')
-                    pos_gate = F.softplus(advantages).detach()
-                    policy_loss = policy_loss + self.reflow_weight * (reflow_loss.sum(dim = -1) * pos_gate).mean()
+                    policy_loss = policy_loss + self.reflow_weight * reflow_loss.mean()
+
+                if self.entropy_coef > 0.:
+                    policy_loss = policy_loss - self.entropy_coef * dist.entropy().sum(dim = -1).mean()
 
                 policy_loss.backward()
                 self.opt_actor.step()
                 self.opt_actor.zero_grad()
 
-                # calculate clipped value loss and update value network separate from policy network
+                # critic update
 
-                values = self.critic(cat((states, past_action), dim = -1))
+                values = self.critic(cat((states, past_actions), dim = -1))
                 critic_loss = hl_gauss(values, returns).mean()
 
                 critic_loss.backward()
@@ -501,20 +503,22 @@ def main(
     num_episodes = 50000,
     max_timesteps = 500,
     actor_hidden_dim = 32,
-    actor_flow_timesteps = 16,
+    actor_flow_timesteps = 4,
     critic_hidden_dim = 64,
     critic_pred_num_bins = 500,
-    minibatch_size = 64,
+    minibatch_size = 128,
     lr = 0.0003,
     betas = (0.9, 0.99),
     lam = 0.95,
     gamma = 0.99,
-    eps_clip = 0.05,
+    eps_clip = 0.1,
     cautious_factor = 0.1,
     ema_decay = 0.9,
-    update_timesteps = 5000,
-    memory_buffer_size = 10_000,
-    advantage_offset_constant = 0.35,
+    init_conc = 2.,
+    update_timesteps = 2048,
+    kl_threshold = 0.05,
+    reflow_weight = 0.04,
+    entropy_coef = 0.01,
     epochs = 4,
     seed = None,
     render = True,
@@ -522,8 +526,13 @@ def main(
     save_every = 1000,
     clear_videos = True,
     video_folder = './lunar-recording',
+    save_path = './fpo.pt',
     load = False
 ):
+    if exists(seed):
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+
     env = gym.make(
         env_name,
         render_mode = 'rgb_array',
@@ -544,8 +553,7 @@ def main(
 
     state_dim = env.observation_space.shape[0]
     num_actions = env.action_space.shape[0]
-
-    memories = deque([], memory_buffer_size)
+    bounds = (torch.from_numpy(env.action_space.low), torch.from_numpy(env.action_space.high))
 
     agent = PPO(
         state_dim,
@@ -562,91 +570,73 @@ def main(
         cautious_factor,
         eps_clip,
         ema_decay,
-        advantage_offset_constant
+        bounds = bounds,
+        init_conc = init_conc,
+        actor_flow_timesteps = actor_flow_timesteps,
+        kl_threshold = kl_threshold,
+        reflow_weight = reflow_weight,
+        entropy_coef = entropy_coef,
+        save_path = save_path
     ).to(device)
 
     if load:
         agent.load()
 
-    if exists(seed):
-        torch.manual_seed(seed)
-        np.random.seed(seed)
-
     time = 0
-    num_policy_updates = 0
+    memories = []
     all_rewards = []
 
     for eps in tqdm(range(num_episodes), desc = 'episodes'):
-
-        state, _ = env.reset(seed = seed)
-        state = torch.from_numpy(state).to(device)
+        state, _ = env.reset(seed = seed if eps == 0 else None)
+        state = torch.from_numpy(state).float().to(device)
 
         cum_rewards = 0.
         past_action = torch.zeros((num_actions,), device = device)
 
         for i in range(max_timesteps):
-            is_last = i == (max_timesteps - 1)
             time += 1
 
-            actor_state = add_batch(state)
-            action, noise = agent.ema_actor.sample(actor_flow_timesteps, state = actor_state, return_noise = True)
-            action, noise = map(remove_batch, (action, noise))
+            action = agent.ema_actor.sample(actor_flow_timesteps, state = rearrange(state, '... -> 1 ...'))
+            action = rearrange(action, '1 ... -> ...')
 
             value = agent.ema_critic.forward_eval(cat((state, past_action)))
 
-            action_to_env = action.cpu().numpy()
-
-            next_state, reward, terminated, truncated, _ = env.step(action_to_env)
-
-            action_out_of_bound_penalty = (action.abs() - 1.).relu().sum()
-
-            reward = reward - action_out_of_bound_penalty
-
-            cum_rewards += reward
-
-            next_state = torch.from_numpy(next_state).to(device)
+            next_state, reward, terminated, truncated, _ = env.step(action.cpu().numpy())
 
             reward = float(reward)
+            cum_rewards += reward
 
-            # determine if truncating, either from environment or learning phase of the agent
+            next_state = torch.from_numpy(next_state).float().to(device)
 
+            ep_done = terminated or truncated or (i == max_timesteps - 1)
             updating_agent = divisible_by(time, update_timesteps)
-            done = terminated or truncated or is_last or updating_agent
+            is_boundary = ep_done or updating_agent
 
-            # take care of truncated by bootstrapping the next value for GAE
-
-            if done and not terminated:
+            if is_boundary and not terminated:
                 next_value = agent.ema_critic.forward_eval(cat((next_state, action)))
-                scalar_next_value = agent.critic_hl_gauss_loss(next_value).item()
-                reward += agent.gamma * scalar_next_value
+                reward += agent.gamma * agent.critic_hl_gauss_loss(next_value).item()
 
-            memory = Memory(True, state, action, noise, past_action, reward, done, value)
-
-            memories.append(memory)
+            memories.append(Memory(state, action, past_action, reward, is_boundary, value))
 
             state = next_state
             past_action = action
 
-            if done or is_last:
+            if ep_done:
                 all_rewards.append(cum_rewards)
 
-            # updating of the agent
-
             if updating_agent:
-                rewards_tensor = tensor(all_rewards)
-
-                print(f'mean reward: {rewards_tensor.mean().item():.3f} | max reward: {rewards_tensor.amax().item():.3f}')
+                if len(all_rewards) > 0:
+                    rewards_tensor = tensor(all_rewards)
+                    print(f'mean reward: {rewards_tensor.mean().item():.3f} | max reward: {rewards_tensor.amax().item():.3f}')
 
                 agent.learn(memories)
-                num_policy_updates += 1
-
                 memories.clear()
                 all_rewards.clear()
 
-            if done:
+            if ep_done:
                 break
 
-        if divisible_by(eps, save_every):
+        if eps > 0 and divisible_by(eps, save_every):
             agent.save()
 
 if __name__ == '__main__':
