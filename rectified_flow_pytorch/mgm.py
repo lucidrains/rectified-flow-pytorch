@@ -324,7 +324,7 @@ class MGMTrainer(Module):
         if not self.is_main:
             return
 
-        checkpoint = torch.load(self.checkpoints_folder / path, weights_only = True)
+        checkpoint = torch.load(self.checkpoints_folder / path, map_location = self.accelerator.device, weights_only = True)
         self.unwrapped_model.load_state_dict(checkpoint['model'])
 
         if exists(self.ema_generator) and exists(checkpoint['ema_generator']):
@@ -366,7 +366,9 @@ class MGMTrainer(Module):
                 if step == 1 or divisible_by(step, 100):
                     acc.print(f'[warmup {step}/{self.warmup_steps}] loss: {warmup_loss.item():.4f}')
 
-            model.critic.load_state_dict(model.generator.state_dict())
+            gen_state, critic_state = model.generator.state_dict(), model.critic.state_dict()
+            if gen_state.keys() == critic_state.keys() and all(gen_state[k].shape == critic_state[k].shape for k in gen_state):
+                model.critic.load_state_dict(gen_state)
 
             if exists(self.ema_generator):
                 self.ema_generator.copy_params_from_model_to_ema()
@@ -376,6 +378,13 @@ class MGMTrainer(Module):
         for _ in range(self.critic_warmup_steps):
             critic_loss = self.model(next(dl), return_critic_loss = True, apply_grad_penalty = False)
             self.step_optimizer(self.critic_optimizer, model.critic.parameters(), critic_loss)
+
+        # initial step 0 snapshot
+
+        if self.is_main and exists(self.save_results_every):
+            self.sample(self.results_folder / 'results.0.png')
+
+        acc.wait_for_everyone()
 
         # alternating critic and generator updates
 
