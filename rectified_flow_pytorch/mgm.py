@@ -163,7 +163,7 @@ class MGM(Module):
         noised = noise.lerp(data, pad_right_ndim_to(times, data.ndim))
         return F.mse_loss(self.generate(noised, times = times, **kwargs), data)
 
-    def critic_loss(self, data, noise = None, apply_grad_penalty = True, **kwargs):
+    def critic_loss(self, data, noise = None, apply_grad_penalty = True, return_grad_penalty = False, **kwargs):
         # regress (data - generated) from flipped interpolant
 
         data, noise = self.prepare_data(data, noise)
@@ -179,11 +179,16 @@ class MGM(Module):
 
         pred = self.critic(interpolated, times = times, **kwargs)
         loss = F.mse_loss(pred, data - generated)
+        grad_penalty = zeros((), **dd(loss))
 
         if use_grad_penalty:
-            loss = loss + zero_centered_gradient_penalty(interpolated, pred, weight = self.grad_penalty_weight)
+            grad_penalty = zero_centered_gradient_penalty(interpolated, pred, weight = self.grad_penalty_weight)
+            loss = loss + grad_penalty
 
-        return loss
+        if not return_grad_penalty:
+            return loss
+
+        return loss, grad_penalty
 
     discriminator_loss = critic_loss
 
@@ -290,6 +295,7 @@ class MGMTrainer(Module):
         assert self.num_sample_rows ** 2 == num_samples, f'{num_samples} must be a square'
         self.num_samples = num_samples
         self.fixed_noise = None
+        self.step = 0
 
     @property
     def is_main(self):
@@ -314,24 +320,39 @@ class MGMTrainer(Module):
             return
 
         torch.save(dict(
+            step = self.step,
             model = self.unwrapped_model.state_dict(),
             ema_generator = self.ema_generator.state_dict() if exists(self.ema_generator) else None,
             gen_optimizer = self.gen_optimizer.state_dict(),
-            critic_optimizer = self.critic_optimizer.state_dict()
+            critic_optimizer = self.critic_optimizer.state_dict(),
+            fixed_noise = self.fixed_noise
         ), str(self.checkpoints_folder / path))
 
-    def load(self, path):
-        if not self.is_main:
-            return
+    def load(self, path, step = None):
+        checkpoint_path = Path(path)
+        if not checkpoint_path.exists():
+            checkpoint_path = self.checkpoints_folder / path
 
-        checkpoint = torch.load(self.checkpoints_folder / path, map_location = self.accelerator.device, weights_only = True)
+        checkpoint = torch.load(checkpoint_path, map_location = self.accelerator.device, weights_only = True)
         self.unwrapped_model.load_state_dict(checkpoint['model'])
 
-        if exists(self.ema_generator) and exists(checkpoint['ema_generator']):
+        if exists(self.ema_generator) and exists(checkpoint.get('ema_generator')):
             self.ema_generator.load_state_dict(checkpoint['ema_generator'])
 
         self.gen_optimizer.load_state_dict(checkpoint['gen_optimizer'])
         self.critic_optimizer.load_state_dict(checkpoint['critic_optimizer'])
+
+        if exists(checkpoint.get('fixed_noise')):
+            self.fixed_noise = checkpoint['fixed_noise'].to(self.accelerator.device)
+
+        if exists(step):
+            self.step = step
+        elif exists(checkpoint.get('step')):
+            self.step = int(checkpoint['step'])
+        elif exists(checkpoint.get('ema_generator')) and 'step' in checkpoint['ema_generator']:
+            self.step = int(checkpoint['ema_generator']['step'].item())
+        else:
+            self.step = 0
 
     def sample(self, fname):
         model = self.unwrapped_model
@@ -354,46 +375,59 @@ class MGMTrainer(Module):
         model = self.unwrapped_model
         self.model.train()
 
-        # denoising warmup
+        if self.step == 0:
+            # denoising warmup
 
-        if self.warmup_steps > 0:
-            warmup_optimizer = acc.prepare(Adam(model.generator.parameters(), lr = self.warmup_learning_rate))
+            if self.warmup_steps > 0:
+                warmup_optimizer = acc.prepare(Adam(model.generator.parameters(), lr = self.warmup_learning_rate))
 
-            for step in range(1, self.warmup_steps + 1):
-                warmup_loss = model.denoising_warmup_loss(next(dl))
-                self.step_optimizer(warmup_optimizer, model.generator.parameters(), warmup_loss)
+                for step in range(1, self.warmup_steps + 1):
+                    warmup_loss = model.denoising_warmup_loss(next(dl))
+                    self.step_optimizer(warmup_optimizer, model.generator.parameters(), warmup_loss)
 
-                if step == 1 or divisible_by(step, 100):
-                    acc.print(f'[warmup {step}/{self.warmup_steps}] loss: {warmup_loss.item():.4f}')
+                    if step == 1 or divisible_by(step, 100):
+                        acc.print(f'[warmup {step}/{self.warmup_steps}] loss: {warmup_loss.item():.4f}')
 
-            gen_state, critic_state = model.generator.state_dict(), model.critic.state_dict()
-            if gen_state.keys() == critic_state.keys() and all(gen_state[k].shape == critic_state[k].shape for k in gen_state):
-                model.critic.load_state_dict(gen_state)
+                gen_state, critic_state = model.generator.state_dict(), model.critic.state_dict()
+                if gen_state.keys() == critic_state.keys() and all(gen_state[k].shape == critic_state[k].shape for k in gen_state):
+                    model.critic.load_state_dict(gen_state)
 
-            if exists(self.ema_generator):
-                self.ema_generator.copy_params_from_model_to_ema()
+                if exists(self.ema_generator):
+                    self.ema_generator.copy_params_from_model_to_ema()
 
-        # critic warmup
+            # critic warmup
 
-        for _ in range(self.critic_warmup_steps):
-            critic_loss = self.model(next(dl), return_critic_loss = True, apply_grad_penalty = False)
-            self.step_optimizer(self.critic_optimizer, model.critic.parameters(), critic_loss)
+            for _ in range(self.critic_warmup_steps):
+                critic_loss = self.model(next(dl), return_critic_loss = True, apply_grad_penalty = False)
+                self.step_optimizer(self.critic_optimizer, model.critic.parameters(), critic_loss)
 
-        # initial step 0 snapshot
+            # initial step 0 snapshot
 
-        if self.is_main and exists(self.save_results_every):
-            self.sample(self.results_folder / 'results.0.png')
+            if self.is_main and exists(self.save_results_every):
+                self.sample(self.results_folder / 'results.0.png')
 
-        acc.wait_for_everyone()
+            acc.wait_for_everyone()
+        else:
+            acc.print(f'resuming from step {self.step}')
 
         # alternating critic and generator updates
 
-        for step in range(1, self.num_train_steps + 1):
+        for step in range(self.step + 1, self.num_train_steps + 1):
             apply_grad_penalty = exists(self.grad_penalty_every) and divisible_by(step, self.grad_penalty_every)
+            grad_penalty = None
 
             for critic_step in range(self.critic_steps):
-                critic_loss = self.model(next(dl), return_critic_loss = True, apply_grad_penalty = apply_grad_penalty and critic_step == 0)
+                step_apply_gp = apply_grad_penalty and critic_step == 0
+                critic_loss, step_grad_penalty = self.model(
+                    next(dl),
+                    return_critic_loss = True,
+                    apply_grad_penalty = step_apply_gp,
+                    return_grad_penalty = True
+                )
                 self.step_optimizer(self.critic_optimizer, model.critic.parameters(), critic_loss)
+
+                if step_apply_gp and model.grad_penalty_weight > 0.:
+                    grad_penalty = step_grad_penalty.detach()
 
             gen_loss = self.model(next(dl), return_critic_loss = False)
             self.step_optimizer(self.gen_optimizer, model.generator.parameters(), gen_loss)
@@ -401,7 +435,11 @@ class MGMTrainer(Module):
             if exists(self.ema_generator):
                 self.ema_generator.update()
 
-            acc.print(f'[{step}] critic: {critic_loss.item():.4f} | gen: {gen_loss.item():.4f}')
+            self.step = step
+
+            critic_mse = critic_loss.detach() - step_grad_penalty.detach()
+            gp_str = f' | gp: {grad_penalty.item():.5f}' if exists(grad_penalty) else ''
+            acc.print(f'[{step}] critic: {critic_mse.item():.4f}{gp_str} | gen: {gen_loss.item():.4f}')
 
             acc.wait_for_everyone()
 

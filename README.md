@@ -498,3 +498,15 @@ $ python train_oxford.py
     url     = {https://arxiv.org/abs/2605.29920},
 }
 ```
+
+```bibtex
+@misc{jia2025antitheticnoisediffusionmodels,
+    title   = {Antithetic Noise in Diffusion Models},
+    author  = {Jing Jia and Sifan Liu and Bowen Song and Wei Yuan and Liyue Shen and Guanyang Wang},
+    year    = {2025},
+    eprint  = {2506.06185},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.LG},
+    url     = {https://arxiv.org/abs/2506.06185},
+}
+```

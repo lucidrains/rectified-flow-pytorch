@@ -1,4 +1,3 @@
-from inspect import signature
 from collections import namedtuple
 from copy import deepcopy
 
@@ -6,25 +5,20 @@ import torch
 from torch import cat, stack, is_tensor
 from torch.optim import Optimizer, SGD
 from torch.func import functional_call
-from torch.utils._pytree import tree_map, tree_flatten
+from torch.utils._pytree import tree_map
 from einops import repeat, reduce, rearrange
 
 from rectified_flow_pytorch.xm_wrapper import (
     XMWrapper,
     exists,
     default,
-    is_batch_tensor
+    is_batch_tensor,
+    batch_and_first_tensor
 )
 
 # explorative modeling (forward xm) with candidate refinement
 # Alexi Gladstone et al. https://arxiv.org/abs/2607.27372
-
-# helpers
-
-def batch_and_first_tensor(args, kwargs):
-    leaves, _ = tree_flatten((args, kwargs))
-    first_tensor = next(t for t in leaves if is_tensor(t))
-    return first_tensor.shape[0], first_tensor
+# antithetic noise pairing - Jia et al. https://arxiv.org/abs/2506.06185
 
 # refinement info
 
@@ -47,9 +41,16 @@ class XMRefinementWrapper(XMWrapper):
         refinement_optimizer = None,
         refinement_optimizer_kwargs = dict(),
         times_kwarg = 'times',
-        noise_kwarg = 'noise'
+        noise_kwarg = 'noise',
+        antithetic_noise = True
     ):
-        super().__init__(flow_model, candidates = candidates, max_batch_size = max_batch_size)
+        super().__init__(
+            flow_model,
+            candidates = candidates,
+            max_batch_size = max_batch_size,
+            antithetic_noise = antithetic_noise,
+            noise_kwarg = noise_kwarg
+        )
 
         assert refinement_steps >= 0, 'refinement_steps must be non-negative'
 
@@ -61,10 +62,7 @@ class XMRefinementWrapper(XMWrapper):
         self.refinement_optimizer_kwargs = refinement_optimizer_kwargs
 
         self.times_kwarg = times_kwarg
-        self.noise_kwarg = noise_kwarg
-
-        self.forward_params = signature(flow_model.forward).parameters
-        self.stochastic_kwargs = {times_kwarg, noise_kwarg} - {None}
+        self.stochastic_kwargs = {kwarg for kwarg in (times_kwarg, noise_kwarg) if exists(kwarg)}
 
     # refinement helpers
 
@@ -112,7 +110,7 @@ class XMRefinementWrapper(XMWrapper):
         if not exists(refinement_optimizer):
             return SGD(params, lr = refinement_lr)
 
-        optimizer_kwargs = dict(refinement_optimizer_kwargs or {})
+        optimizer_kwargs = dict(default(refinement_optimizer_kwargs, dict()))
 
         if isinstance(refinement_optimizer, Optimizer):
             assert exists(param_map), 'param_map is required to copy an optimizer instance'
@@ -160,23 +158,16 @@ class XMRefinementWrapper(XMWrapper):
 
     # input helpers
 
-    def add_stochastic_kwargs(self, kwargs, batch, first_tensor, candidates = None):
+    def add_stochastic_kwargs(self, kwargs, batch, first_tensor, candidates = None, antithetic_noise = None):
         kwargs = dict(kwargs)
         device = first_tensor.device
 
-        if exists(self.times_kwarg) and self.times_kwarg not in kwargs and self.times_kwarg in self.forward_params:
+        if exists(self.times_kwarg) and not exists(kwargs.get(self.times_kwarg)) and self.times_kwarg in self.forward_params:
             kwargs[self.times_kwarg] = torch.rand(batch, device = device)
 
-        if exists(self.noise_kwarg) and self.noise_kwarg not in kwargs and self.noise_kwarg in self.forward_params:
-            noise_shape = default(self.data_shape, first_tensor.shape[1:])
-            noise_dtype = first_tensor.dtype if first_tensor.is_floating_point() else torch.float32
-            noise_batch_shape = (batch,) if not exists(candidates) else (batch, candidates)
-
-            kwargs[self.noise_kwarg] = torch.randn(
-                (*noise_batch_shape, *noise_shape),
-                device = device,
-                dtype = noise_dtype
-            )
+        if exists(self.noise_kwarg) and not exists(kwargs.get(self.noise_kwarg)) and self.noise_kwarg in self.forward_params:
+            noise = self.sample_noise(batch, default(candidates, 1), first_tensor, antithetic_noise = antithetic_noise)
+            kwargs[self.noise_kwarg] = noise if exists(candidates) else rearrange(noise, 'b 1 ... -> b ...')
 
         return kwargs
 
@@ -225,29 +216,6 @@ class XMRefinementWrapper(XMWrapper):
         return args_K, kwargs_K
 
     # forward paths
-
-    def best_of_k_losses(self, args, kwargs, batch, candidates, max_batch_size):
-        total = batch * candidates
-        chunk_size = default(max_batch_size, total) if self.has_loss_reduction else 1
-        extra_kwargs = {'loss_reduction': 'none'} if self.has_loss_reduction else dict()
-
-        losses = []
-
-        for start in range(0, total, chunk_size):
-            end = min(start + chunk_size, total)
-
-            chunk_args, chunk_kwargs = tree_map(
-                lambda t: t[start:end] if is_batch_tensor(t, total) else t,
-                (args, kwargs)
-            )
-            chunk_kwargs.update(extra_kwargs)
-
-            loss = self.flow_model(*chunk_args, **chunk_kwargs)
-            loss = rearrange(loss, '-> 1 1') if loss.ndim == 0 else rearrange(loss, 'b ... -> b (...)')
-            losses.append(loss)
-
-        raw_loss = cat(losses, dim = 0)
-        return reduce(raw_loss, '(b k) ... -> b k', 'mean', b = batch, k = candidates)
 
     def refined_loss(
         self,
@@ -330,6 +298,7 @@ class XMRefinementWrapper(XMWrapper):
         *args,
         candidates = None,
         max_batch_size = None,
+        antithetic_noise = None,
         refinement_steps = None,
         refinement_lr = None,
         refinement_optimizer = None,
@@ -340,6 +309,7 @@ class XMRefinementWrapper(XMWrapper):
     ):
         candidates = default(candidates, self.candidates)
         max_batch_size = default(max_batch_size, self.max_batch_size)
+        antithetic_noise = default(antithetic_noise, self.antithetic_noise)
 
         refinement_steps = default(refinement_steps, self.refinement_steps)
         refinement_lr = default(refinement_lr, self.refinement_lr)
@@ -356,7 +326,7 @@ class XMRefinementWrapper(XMWrapper):
 
         # maybe sample shared times and candidate specific noises
 
-        kwargs = self.add_stochastic_kwargs(kwargs, batch, first_tensor, candidates)
+        kwargs = self.add_stochastic_kwargs(kwargs, batch, first_tensor, candidates, antithetic_noise = antithetic_noise)
 
         use_refinement = refinement_steps > 0 and torch.is_grad_enabled()
 

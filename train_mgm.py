@@ -5,7 +5,7 @@ import torchvision.transforms as T
 from datasets import load_dataset
 
 from rectified_flow_pytorch import ImageDataset, Unet
-from rectified_flow_pytorch.mgm import MGM, MGMTrainer
+from rectified_flow_pytorch.mgm import MGM, MGMTrainer, exists
 from rectified_flow_pytorch.rectified_flow import (
     normalize_to_neg_one_to_one,
     unnormalize_to_zero_to_one
@@ -29,7 +29,7 @@ class OxfordFlowersDataset(Dataset):
 
     def __getitem__(self, idx):
         image = self.images[idx].float() / 255.
-        return self.flip(image) if self.flip is not None else image
+        return self.flip(image) if exists(self.flip) else image
 
 def train(
     folder = None,
@@ -49,13 +49,15 @@ def train(
     grad_penalty_every = 4,
     ema_decay = 0.99,
     save_results_every = 100,
+    checkpoint_every = 1000,
     results_folder = './results_mgm',
     checkpoints_folder = './checkpoints_mgm',
-    clear_results_folder = True
+    clear_results_folder = True,
+    resume = None
 ):
     dataset = (
         ImageDataset(folder = folder, image_size = image_size, augment_horizontal_flip = True)
-        if folder is not None else
+        if exists(folder) else
         OxfordFlowersDataset(image_size = image_size)
     )
 
@@ -82,10 +84,14 @@ def train(
         batch_size = batch_size,
         ema_kwargs = dict(beta = ema_decay, update_after_step = 10),
         save_results_every = save_results_every,
+        checkpoint_every = checkpoint_every,
         results_folder = results_folder,
         checkpoints_folder = checkpoints_folder,
-        clear_results_folder = clear_results_folder
+        clear_results_folder = clear_results_folder and not exists(resume)
     )
+
+    if exists(resume):
+        trainer.load(resume)
 
     trainer()
 
