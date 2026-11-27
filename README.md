@@ -510,3 +510,14 @@ $ python train_oxford.py
     url     = {https://arxiv.org/abs/2506.06185},
 }
 ```
+
+```bibtex
+@inproceedings{saravanos2026flowoptimizer,
+    title     = {Learning-to-Optimize via Deep Unfolded Flows},
+    author    = {Augustinos D. Saravanos and Oswin So and H. M. Sabbir Ahmad and Chuchu Fan},
+    booktitle = {Proceedings of the 43rd International Conference on Machine Learning (ICML)},
+    year      = {2026},
+    note      = {Spotlight},
+    url       = {https://openreview.net/forum?id=ZOtOq7hxJP}
+}
+```
